@@ -1,0 +1,16 @@
+{
+  "configurations": [
+    {
+      "name": "launch",
+      "type": "node",
+      "request": "launch",
+      "program": "index.js",
+      "args": [],
+      "runtimeArgs": [
+        "--inspect"
+      ],
+      "cwd": "${workspaceRoot}/dist/",
+      "protocol": "inspector"
+    }
+  ]
+}
