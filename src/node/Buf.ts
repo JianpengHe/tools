@@ -2,12 +2,15 @@ export class Buf {
   public lastReadValue: any;
   public offset: number;
   public buffer: Buffer;
-  constructor(buf: Buffer, offset?: number) {
-    this.buffer = buf;
+  constructor(buf?: Buffer, offset?: number) {
+    this.buffer = buf ?? Buffer.allocUnsafe(0);
     this.offset = offset ?? 0;
   }
   public UIntLEToBuffer(number: number, byteLength?: number) {
     const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
+    if (!number) {
+      return buf.slice(0, 1).fill(number);
+    }
     let index = 0;
     while (number > 0) {
       buf[index++] = number % 256;
@@ -17,6 +20,9 @@ export class Buf {
   }
   public UIntBEToBuffer(number: number, byteLength?: number) {
     const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
+    if (!number) {
+      return buf.slice(0, 1).fill(number);
+    }
     let index = buf.length;
     while (number > 0) {
       buf[--index] = number % 256;
@@ -63,13 +69,19 @@ export class Buf {
   public write(buf: Buffer, offset?: number) {
     offset = offset ?? this.offset;
     this.offset = offset < 0 ? this.buffer.length : offset;
-    if (this.buffer.length < offset + buf.length + 1) {
-      this.alloc(offset + buf.length + 1 - this.buffer.length);
+    if (this.buffer.length < offset + buf.length) {
+      this.alloc(offset + buf.length - this.buffer.length);
     }
     buf.forEach(byte => {
       this.buffer[this.offset++] = byte;
     });
     return this;
+  }
+  public writeUIntBE(number: number, byteLength?: number, offset?: number) {
+    return this.write(this.UIntBEToBuffer(number, byteLength), offset);
+  }
+  public writeUIntLE(number: number, byteLength?: number, offset?: number) {
+    return this.write(this.UIntLEToBuffer(number, byteLength), offset);
   }
   public writeStringNUL(str: string | Buffer, offset?: number) {
     return this.write(Buffer.concat([Buffer.from(str), this.UIntBEToBuffer(0)]), offset);
