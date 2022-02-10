@@ -25,10 +25,10 @@ export class RecvStream {
       return;
     }
     if (this.subReadStream) {
-      this.readSubData();
-    } else {
-      this.readHeader();
+      this.subReadStream.tryRead();
+      return;
     }
+    this.readHeader();
   }
   private readHeader() {
     const header = this.stream.read(this.headerSize);
@@ -39,49 +39,51 @@ export class RecvStream {
       if (this.subReadStream) {
         throw new TypeError("只能调用一次");
       }
-      this.subReadStream = new SubReadStream(this.stream, readLength);
-      process.nextTick(() => this.readable());
+      this.subReadStream = new SubReadStream(this.stream, readLength, () => {
+        this.subReadStream = undefined;
+        this.readable();
+      });
       return this.subReadStream;
     });
-  }
-  private readSubData() {
-    if (this.subReadStream && this.subReadStream._read(null) !== 0) {
-      return;
-    }
-    this.subReadStream = undefined;
-    this.readable();
   }
 }
 
 export class SubReadStream extends Readable {
   public stream: IReadStream;
-  public lastTimeReadSize: number;
+  public canRecvSize: number;
   public needReadSize: number;
-  constructor(stream: IReadStream, needReadSize: number) {
+  public done: () => void;
+  constructor(stream: IReadStream, needReadSize: number, done: () => void) {
     super();
-    this.lastTimeReadSize = 0;
+    this.canRecvSize = 0;
     this.stream = stream;
     this.needReadSize = needReadSize;
+    this.done = done;
   }
   public _construct(callback: (err: TypeError | undefined) => void) {
     callback(this.stream.destroyed ? new TypeError("stream destroyed") : undefined);
   }
-  public _read(size: number | null) {
-    if (size) {
-      this.lastTimeReadSize = Math.min(size, this.needReadSize);
-    }
-    if (this.lastTimeReadSize) {
-      const buf = this.stream.read(this.lastTimeReadSize);
-      if (buf) {
-        this.push(buf);
-        this.lastTimeReadSize = 0;
-        this.needReadSize -= buf.length;
-      }
-    }
-    if (this.needReadSize === 0) {
+  public tryRead() {
+    if (!this.needReadSize) {
       this.push(null);
+      this.done();
+      return;
     }
-    return this.needReadSize;
+    const nowNeedRead = Math.min(this.canRecvSize, this.stream.readableLength, this.needReadSize);
+    if (nowNeedRead === 0) {
+      return;
+    }
+    const buf = this.stream.read(nowNeedRead);
+    if (buf) {
+      this.push(buf);
+      this.needReadSize -= buf.length;
+      this.canRecvSize -= buf.length;
+      this.tryRead();
+    }
+  }
+  public _read(canRecvSize: number) {
+    this.canRecvSize = canRecvSize || 0;
+    this.tryRead();
   }
   public _destroy(err, callback) {
     callback(err);

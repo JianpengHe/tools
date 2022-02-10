@@ -86,7 +86,8 @@ export class Buf {
   public writeStringNUL(str: string | Buffer, offset?: number) {
     return this.write(Buffer.concat([Buffer.from(str), this.UIntBEToBuffer(0)]), offset);
   }
-  public writeStringPrefix(str: string | Buffer, prefixCallBackFn: (length: number) => Buffer, offset?: number) {
-    return this.write(Buffer.concat([prefixCallBackFn(Buffer.byteLength(str)), Buffer.from(str)]), offset);
+  public writeStringPrefix(str: string | Buffer, prefixCallBackFn?: (length: number) => Buffer | undefined, offset?: number) {
+    const buf = (prefixCallBackFn && prefixCallBackFn(Buffer.byteLength(str))) || undefined;
+    return this.write(buf ? Buffer.concat([buf, Buffer.from(str)]) : Buffer.from(str), offset);
   }
 }
