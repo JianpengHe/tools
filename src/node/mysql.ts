@@ -128,16 +128,16 @@ export class Mysql {
     const len = buf.readUIntLE(3);
     const index = buf.readUIntLE(1);
     const type = buf.readUIntLE(1);
-    const dateBuffer = await RecvAll(readBufferFn(len - 1));
+    const dataBuffer = await RecvAll(readBufferFn(len - 1));
     // OK 响应报文	0x00
     // Error 响应报文	0xFF
     // Result Set 报文	0x01 - 0xFA
     // Field 报文	0x01 - 0xFA
     // Row Data 报文	0x01 - 0xFA
     // EOF 报文	0xFE
-    console.log("↓\t", "type", type, "index", index, dateBuffer, this.socket.readableLength);
+    console.log("↓\tlen", len, "type", type, "index", index, dataBuffer, this.socket.readableLength);
     if (type === 0xff) {
-      const errBuf = new Buf(dateBuffer);
+      const errBuf = new Buf(dataBuffer);
       const code = errBuf.readUIntLE(2);
       const msg = errBuf.readString();
       console.log(code, msg);
@@ -149,16 +149,19 @@ export class Mysql {
         this.recvQuery();
         this.recvDataQueue.length = 0;
       } else {
-        this.handshakeFn(dateBuffer, index);
+        this.handshakeFn(dataBuffer, index);
       }
       return;
     }
-    if (type === 0xfe && dateBuffer.length < 8) {
+    if (type === 0xfe && dataBuffer.length < 8) {
       this.recvDataQueue.push(Buffer.allocUnsafe(0));
       this.recvQuery();
       return;
     }
-    this.recvDataQueue.push(Buffer.concat([Buffer.allocUnsafe(1).fill(type), dateBuffer]));
+    this.recvDataQueue.push(Buffer.concat([Buffer.allocUnsafe(1).fill(type), dataBuffer]));
+    if (type === 0 && index === 1 && this.recvDataQueue.length === 1) {
+      this.recvQuery();
+    }
   };
   private recvQuery() {
     const callback = this.callbackQueue.splice(0, 1)[0];
@@ -206,51 +209,58 @@ export class Mysql {
   private readResultset() {
     return new Promise(resolve => {
       const arr: Buffer[] = [];
-      this.callbackQueue.push(() => arr.push(...this.recvDataQueue));
       this.callbackQueue.push(() => {
+        if (this.recvDataQueue.length === 1 && this.recvDataQueue[0].length > 8) {
+          const buf = new MysqlBuf(this.recvDataQueue[0]);
+          resolve({ affectedRows: buf.readIntLenenc(1), lastInsertId: buf.readIntLenenc(), statusFlags: buf.readUIntLE(2), warningsNumber: buf.readUIntLE(2), message: buf.readString() });
+          return;
+        }
         arr.push(...this.recvDataQueue);
-        let buffer = arr.splice(0, 1)[0];
-        // const rowNum = buffer[0];
-        // read header
-        const headerInfo: {
-          catalog: string;
-          schema: string;
-          table: string;
-          org_table: string;
-          name: string;
-          org_name: string;
-          characterSet: number;
-          columnLength: number;
-          type: IFieldType;
-          flags: IFieldFlags;
-          decimals: number;
-        }[] = [];
-        const data: any[] = [];
-        while ((buffer = arr.splice(0, 1)[0])?.length) {
-          const buf = new MysqlBuf(buffer);
-          headerInfo.push({
-            catalog: buf.readString(buf.readIntLenenc()),
-            schema: buf.readString(buf.readIntLenenc()),
-            table: buf.readString(buf.readIntLenenc()),
-            org_table: buf.readString(buf.readIntLenenc()),
-            name: buf.readString(buf.readIntLenenc()),
-            org_name: buf.readString(buf.readIntLenenc()),
-            characterSet: buf.readUIntLE(2, buf.offset + 1),
-            columnLength: buf.readUIntLE(4),
-            type: buf.readUIntLE(1),
-            flags: buf.readUIntLE(2),
-            decimals: buf.readUIntBE(1),
-          });
-        }
-        console.log(headerInfo);
-        while ((buffer = arr.splice(0, 1)[0])?.length) {
-          const buf = new MysqlBuf(buffer);
-          const rowData: any[] = [];
-          buf.offset += Math.floor((headerInfo.length + 7 + 2) / 8) + 1;
-          headerInfo.forEach(({ type }) => rowData.push(this.readValue(type, buf)));
-          data.push(rowData);
-        }
-        console.log(data);
+        this.callbackQueue.push(() => {
+          arr.push(...this.recvDataQueue);
+          let buffer = arr.splice(0, 1)[0];
+          // read header
+          const headerInfo: {
+            catalog: string;
+            schema: string;
+            table: string;
+            org_table: string;
+            name: string;
+            org_name: string;
+            characterSet: number;
+            columnLength: number;
+            type: IFieldType;
+            flags: IFieldFlags;
+            decimals: number;
+          }[] = [];
+          const data: any[] = [];
+          while ((buffer = arr.splice(0, 1)[0])?.length) {
+            const buf = new MysqlBuf(buffer);
+            headerInfo.push({
+              catalog: buf.readString(buf.readIntLenenc()),
+              schema: buf.readString(buf.readIntLenenc()),
+              table: buf.readString(buf.readIntLenenc()),
+              org_table: buf.readString(buf.readIntLenenc()),
+              name: buf.readString(buf.readIntLenenc()),
+              org_name: buf.readString(buf.readIntLenenc()),
+              characterSet: buf.readUIntLE(2, buf.offset + 1),
+              columnLength: buf.readUIntLE(4),
+              type: buf.readUIntLE(1),
+              flags: buf.readUIntLE(2),
+              decimals: buf.readUIntBE(1),
+            });
+          }
+          console.log(headerInfo);
+          while ((buffer = arr.splice(0, 1)[0])?.length) {
+            const buf = new MysqlBuf(buffer);
+            const rowData: any[] = [];
+            buf.offset += Math.floor((headerInfo.length + 7 + 2) / 8) + 1;
+            headerInfo.forEach(({ type }) => rowData.push(this.readValue(type, buf)));
+            data.push(rowData);
+          }
+          console.log(data);
+          resolve({ headerInfo, data });
+        });
       });
     });
   }
@@ -365,17 +375,17 @@ export class Mysql {
     loginBuf.write(password);
     loginBuf.writeStringNUL(this.connectInfo.database);
     loginBuf.writeStringNUL(info.auth_plugin_name);
-    // loginBuf.offset = 0;
-    // const info2 = {
-    //   capability_flags: loginBuf.read(4),
-    //   max_packet_size: loginBuf.readUIntLE(4),
-    //   character_set: loginBuf.readUIntLE(1) === 33 ? "utf8_general_ci" : "unknow",
-    //   username: loginBuf.readString(undefined, loginBuf.offset + 23),
-    //   password: loginBuf.read(loginBuf.readUIntLE(1)),
-    //   database: loginBuf.readString(),
-    //   auth_plugin_name: loginBuf.readString(),
-    // };
-    // console.log(info2);
+    loginBuf.offset = 0;
+    const info2 = {
+      capability_flags: loginBuf.read(4),
+      max_packet_size: loginBuf.readUIntLE(4),
+      character_set: loginBuf.readUIntLE(1) === 33 ? "utf8" : "utf8mb4",
+      username: loginBuf.readString(undefined, loginBuf.offset + 23),
+      password: loginBuf.read(loginBuf.readUIntLE(1)),
+      database: loginBuf.readString(),
+      auth_plugin_name: loginBuf.readString(),
+    };
+    console.log(info2);
     this.send(loginBuf.buffer, index + 1);
   }
 }

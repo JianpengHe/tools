@@ -9,5 +9,8 @@ import { Mysql } from "./node/mysql";
   // const pid = await mysql.prepare(`SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB.map(a => "?").join(",")});`);
 
   const pid = await mysql.prepare(`SELECT * FROM INFO.student  LIMIT ?`);
-  mysql.execute(pid, [20]);
+  console.log("result:", await mysql.execute(pid, [20]));
+
+  // const pid = await mysql.prepare("UPDATE info.`student` SET `createTime` = '2022-02-14 15:33:35' WHERE `student`.`studentId` = ?;");
+  // console.log("result:", await mysql.execute(pid, [172017001]));
 })();
