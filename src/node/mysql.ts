@@ -10,6 +10,7 @@ export type IConnect = {
   user: string;
   password: string;
   database: string;
+  character?: "utf8" | "utf8mb4";
 };
 export class MysqlBuf extends Buf {
   constructor(buf?: Buffer, offset?: number) {
@@ -107,6 +108,7 @@ export class Mysql {
   private handshakeDone: boolean;
   private callbackQueue: (() => void)[];
   private recvDataQueue: Buffer[];
+  private character: "utf8" | "utf8mb4";
   public handshake: Promise<void>;
   constructor(connect: IConnect) {
     this.connectInfo = connect;
@@ -114,6 +116,7 @@ export class Mysql {
     this.handshakeDone = false;
     this.callbackQueue = [];
     this.recvDataQueue = [];
+    this.character = connect.character || "utf8mb4";
     this.handshake = new Promise(resolve => {
       this.callbackQueue.push(() => resolve());
     });
@@ -349,7 +352,7 @@ export class Mysql {
     const loginBuf = new Buf();
     loginBuf.writeUIntLE(696973, 4);
     loginBuf.writeUIntLE(3221225472, 4);
-    loginBuf.writeUIntLE(info.character_set, 1);
+    loginBuf.writeUIntLE(/*info.character_set*/ this.character === "utf8" ? 33 : 45, 1);
     loginBuf.alloc(23, 0);
     loginBuf.writeStringNUL(this.connectInfo.user, loginBuf.offset + 23);
     const password_sha1 = SHA1(Buffer.from(this.connectInfo.password));
