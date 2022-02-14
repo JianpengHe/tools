@@ -203,10 +203,10 @@ export class Mysql {
           break;
       }
     });
-    this.send(Buffer.concat([buf.buffer, dataBuf.buffer]), 0);
-    return this.readResultset();
+
+    return this.readResultset(Buffer.concat([buf.buffer, dataBuf.buffer]), 0);
   }
-  private readResultset() {
+  private readResultset(sendBuf: Buffer, index: number) {
     return new Promise(resolve => {
       const arr: Buffer[] = [];
       this.callbackQueue.push(() => {
@@ -262,6 +262,7 @@ export class Mysql {
           resolve({ headerInfo, data });
         });
       });
+      this.send(sendBuf, index);
     });
   }
   public readValue(type: number, buf: MysqlBuf) {
