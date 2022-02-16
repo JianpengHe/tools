@@ -2,6 +2,6 @@
   "tabWidth": 2,
   "singleQuote": false,
   "semi": true,
-  "printWidth": 320,
+  "printWidth": 120,
   "arrowParens": "avoid"
 }

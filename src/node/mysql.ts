@@ -2,6 +2,10 @@ import { Buf } from "./Buf";
 import { IGetLengthFn, RecvAll, RecvStream } from "./RecvStream";
 import * as net from "net";
 import * as crypto from "crypto";
+const showTCPpacket = false;
+const Log = (...msg: any) => {
+  //  console.log(...msg)
+};
 export const SHA1 = (str: Buffer) => crypto.createHash("sha1").update(str).digest();
 
 export type IConnect = {
@@ -120,7 +124,7 @@ export class Mysql {
     this.handshake = new Promise(resolve => {
       this.callbackQueue.push(() => resolve());
     });
-    setInterval(() => console.log(this.socket.readableLength), 1000);
+    // setInterval(() => Log(this.socket.readableLength, this.callbackQueue), 1000);
   }
 
   private recv: IGetLengthFn = async (buffer, readBufferFn) => {
@@ -135,7 +139,9 @@ export class Mysql {
     // Field 报文	0x01 - 0xFA
     // Row Data 报文	0x01 - 0xFA
     // EOF 报文	0xFE
-    console.log("↓\tlen", len, "type", type, "index", index, dataBuffer, this.socket.readableLength);
+    if (showTCPpacket) {
+      console.log("↓\tlen", len, "type", type, "index", index, dataBuffer, this.socket.readableLength);
+    }
     if (type === 0xff) {
       const errBuf = new Buf(dataBuffer);
       const code = errBuf.readUIntLE(2);
@@ -167,6 +173,8 @@ export class Mysql {
     const callback = this.callbackQueue.splice(0, 1)[0];
     if (callback) {
       callback();
+    } else {
+      throw new TypeError("未设置回调！！！");
     }
     this.recvDataQueue.length = 0;
   }
@@ -174,12 +182,23 @@ export class Mysql {
     if (!this.handshakeDone) {
       throw new TypeError("未登录成功");
     }
-    this.send(new Buf().writeUIntLE(0x16).writeStringPrefix(prepareSql).buffer, 0);
     return new Promise(resolve => {
-      this.callbackQueue.push(() => {
-        resolve(this.recvDataQueue[0].readUInt32LE(1));
-      });
-      this.callbackQueue.push(() => {});
+      const prepare1 = () => {
+        Log("解决准备", this.recvDataQueue, this.callbackQueue);
+        const buf = new Buf(this.recvDataQueue[0]);
+        const prepare2 = () => {
+          Log("prepare2", prepareSql, this.callbackQueue, this.recvDataQueue);
+          if (buf.readUIntLE(2) > 0 && buf.readUIntLE(2) > 0) {
+            this.callbackQueue.unshift(prepare3);
+          }
+        };
+        const prepare3 = () => Log("prepare3", prepareSql, this.callbackQueue, this.recvDataQueue);
+        this.callbackQueue.unshift(prepare2);
+        Log("prepare1", prepareSql, this.callbackQueue, this.recvDataQueue);
+        resolve(buf.readUIntLE(4, 1));
+      };
+      this.callbackQueue.push(prepare1);
+      this.send(new Buf().writeUIntLE(0x16).writeStringPrefix(prepareSql).buffer, 0);
     });
   }
   public execute(prepareId: number, params: any[]) {
@@ -210,14 +229,23 @@ export class Mysql {
     return new Promise(resolve => {
       const arr: Buffer[] = [];
       this.callbackQueue.push(() => {
-        if (this.recvDataQueue.length === 1 && this.recvDataQueue[0].length > 8) {
+        if (this.recvDataQueue.length === 1 && this.recvDataQueue[0].length > 12) {
+          Log("无结果集");
           const buf = new MysqlBuf(this.recvDataQueue[0]);
-          resolve({ affectedRows: buf.readIntLenenc(1), lastInsertId: buf.readIntLenenc(), statusFlags: buf.readUIntLE(2), warningsNumber: buf.readUIntLE(2), message: buf.readString() });
+          resolve({
+            affectedRows: buf.readIntLenenc(1),
+            lastInsertId: buf.readIntLenenc(),
+            statusFlags: buf.readUIntLE(2),
+            warningsNumber: buf.readUIntLE(2),
+            message: buf.readString(),
+          });
           return;
         }
+        Log("有结果集");
         arr.push(...this.recvDataQueue);
-        this.callbackQueue.push(() => {
+        this.callbackQueue.unshift(() => {
           arr.push(...this.recvDataQueue);
+          Log("arr", arr);
           let buffer = arr.splice(0, 1)[0];
           // read header
           const headerInfo: {
@@ -250,7 +278,7 @@ export class Mysql {
               decimals: buf.readUIntBE(1),
             });
           }
-          console.log(headerInfo);
+          Log(headerInfo);
           while ((buffer = arr.splice(0, 1)[0])?.length) {
             const buf = new MysqlBuf(buffer);
             const rowData: any[] = [];
@@ -258,7 +286,7 @@ export class Mysql {
             headerInfo.forEach(({ type }) => rowData.push(this.readValue(type, buf)));
             data.push(rowData);
           }
-          console.log(data);
+          Log(data);
           resolve({ headerInfo, data });
         });
       });
@@ -342,7 +370,10 @@ export class Mysql {
     const head = Buffer.alloc(4);
     head.writeIntLE(buf.length, 0, 3);
     head[3] = index;
-    console.log("↑\t", "head", head, "buf", buf);
+
+    if (showTCPpacket) {
+      console.log("↑\t", "head", head, "buf", buf);
+    }
     this.socket.write(Buffer.concat([head, buf]));
   }
   private handshakeFn(buffer: Buffer, index: number) {
@@ -359,11 +390,11 @@ export class Mysql {
       auth_plugin_data_part_2: handshakeBuf.read(handshakeBuf.lastReadValue - 9, handshakeBuf.offset + 10),
       auth_plugin_name: handshakeBuf.readString(undefined, handshakeBuf.offset + 1),
     };
-    console.log(info);
+    Log(info);
     const loginBuf = new Buf();
     loginBuf.writeUIntLE(696973, 4);
     loginBuf.writeUIntLE(3221225472, 4);
-    loginBuf.writeUIntLE(/*info.character_set*/ this.character === "utf8" ? 33 : 45, 1);
+    loginBuf.writeUIntLE(this.character === "utf8" ? 33 : 45, 1);
     loginBuf.alloc(23, 0);
     loginBuf.writeStringNUL(this.connectInfo.user, loginBuf.offset + 23);
     const password_sha1 = SHA1(Buffer.from(this.connectInfo.password));
@@ -386,7 +417,7 @@ export class Mysql {
       database: loginBuf.readString(),
       auth_plugin_name: loginBuf.readString(),
     };
-    console.log(info2);
+    Log(info2);
     this.send(loginBuf.buffer, index + 1);
   }
 }
