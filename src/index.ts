@@ -1,22 +1,38 @@
 import { XML } from "./node/XML";
 import { Buf } from "./node/Buf";
 import { Mysql } from "./node/mysql";
-console.log(
-  XML.parseTerse(`<xml>
-<events date="01-10-2009" color="0x99CC00" selected="true"> 
-<b name="555">wer</b>
-   <event>
-        <title>You can use HTML and CSS</title>
-        <description><![CDATA[This is the description ]]></description>
-    </event>
-    <a>yy
-    yy
-    l</a>
-</events>
-</xml>`).xml
-);
+const text = `<xml>
+  <events date="01-10-2009" color="0x99CC00" selected="true"> 
+  <a y="53"></a>
+     <event>
+          <title>You can use HTML and CSS</title>
+          <description><![CDATA[This is the description ]]></description>
+          <description1>![CDATA[This is the description ]]</description1>
+      </event>
+  </events>
+  <b><txt>566
+  677
+  </txt><doc>
+  <a
+     a2="2"   a1="1"
+  >123</a>
+</doc></b>
+</xml>`;
+const time = 1e5;
+console.log(XML.parseTerse(text).xml);
+console.time("递归");
+for (let index = 0; index < time; index++) {
+  XML.parseTerse(text);
+}
+console.timeEnd("递归");
 
-async () => {
+// console.time("循环");
+// for (let index = 0; index < time; index++) {
+//   XML.parseTerse2(text);
+// }
+// console.timeEnd("循环");
+
+/*(async () => {
   const mysql = new Mysql({
     host: "127.0.0.1",
     port: 3306,
@@ -48,4 +64,4 @@ async () => {
   ]);
   console.log("result1:", result1);
   console.log("result2:", result2);
-}; //();
+})();*/
