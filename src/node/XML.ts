@@ -53,7 +53,7 @@ export const XML = {
   // },
   parseTerse(text: string, position: number = 0) {
     const getTab = () => {
-      let positionStart = text.indexOf("<", position);
+      const positionStart = text.indexOf("<", position);
       if (positionStart === -1) {
         return null;
       }
@@ -82,7 +82,7 @@ export const XML = {
         }
         tabName = tabName.trim();
         subobj[tabName] = fn({});
-        if (Object.keys(subobj[tabName] || {}).length === 0) {
+        if (Object.keys(subobj[tabName]).length === 0) {
           const value = text.substring(positionData, position - tabName.length - 3);
           subobj[tabName] = value.indexOf("<![CDATA[") === 0 ? value.substring(9, value.length - 3) : value;
         }
