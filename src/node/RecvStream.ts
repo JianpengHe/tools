@@ -2,13 +2,6 @@ import { Readable, Duplex } from "stream";
 export type IReadStream = Readable | Duplex;
 export type IReadBufferFn = (readLength: number) => SubReadStream;
 export type IGetLengthFn = (headerBuf: Buffer, readBufferFn: IReadBufferFn) => void;
-export const RecvAll = (stream: IReadStream): Promise<Buffer> =>
-  new Promise((resolve, reject) => {
-    const body: Buffer[] = [];
-    stream.on("data", chuck => body.push(chuck));
-    stream.once("end", () => resolve(Buffer.concat(body)));
-    stream.once("error", reject);
-  });
 export class RecvStream {
   public stream: IReadStream;
   public headerSize: number;

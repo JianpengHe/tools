@@ -9,7 +9,7 @@ export class Buf {
   public UIntLEToBuffer(number: number, byteLength?: number) {
     const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
     if (!number) {
-      return buf.slice(0, 1).fill(number);
+      return buf.slice(0, byteLength ?? 1).fill(number);
     }
     let index = 0;
     while (number > 0) {
@@ -21,7 +21,7 @@ export class Buf {
   public UIntBEToBuffer(number: number, byteLength?: number) {
     const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
     if (!number) {
-      return buf.slice(0, 1).fill(number);
+      return buf.slice(0, byteLength ?? 1).fill(number);
     }
     let index = buf.length;
     while (number > 0) {
@@ -57,12 +57,40 @@ export class Buf {
     return this.lastReadValue;
   }
   public readUIntBE(byteLength: number, offset?: number): number {
-    this.lastReadValue = this.buffer.readUIntBE((this.offset = offset ?? this.offset), byteLength);
+    this.offset = offset ?? this.offset;
+    if (byteLength <= 6) {
+      this.lastReadValue = this.buffer.readUIntLE(this.offset, byteLength);
+    } else {
+      this.lastReadValue = this.buffer.readUIntLE(this.offset + byteLength - 6, 6);
+      for (let index = 6; index < byteLength; index++) {
+        this.lastReadValue *= 256;
+        this.lastReadValue += this.buffer[this.offset + index];
+      }
+    }
+    // this.lastReadValue = 0;
+    // for (let index = 0; index <byteLength; index++) {
+    //   this.lastReadValue *= 256;
+    //   this.lastReadValue += this.buffer[index]
+    // }
     this.offset += byteLength;
     return this.lastReadValue;
   }
   public readUIntLE(byteLength: number, offset?: number): number {
-    this.lastReadValue = this.buffer.readUIntLE((this.offset = offset ?? this.offset), byteLength);
+    this.offset = offset ?? this.offset;
+    if (byteLength <= 6) {
+      this.lastReadValue = this.buffer.readUIntLE(this.offset, byteLength);
+    } else {
+      this.lastReadValue = this.buffer.readUIntLE(this.offset + byteLength - 6, 6);
+      for (let index = byteLength - 7; index >= 0; index--) {
+        this.lastReadValue *= 256;
+        this.lastReadValue += this.buffer[this.offset + index];
+      }
+    }
+    // this.lastReadValue = 0;
+    // for (let index = byteLength - 1; index >= 0; index--) {
+    //   this.lastReadValue *= 256;
+    //   this.lastReadValue += this.buffer[this.offset + index];
+    // }
     this.offset += byteLength;
     return this.lastReadValue;
   }
@@ -86,7 +114,11 @@ export class Buf {
   public writeStringNUL(str: string | Buffer, offset?: number) {
     return this.write(Buffer.concat([Buffer.from(str), this.UIntBEToBuffer(0)]), offset);
   }
-  public writeStringPrefix(str: string | Buffer, prefixCallBackFn?: (length: number) => Buffer | undefined, offset?: number) {
+  public writeStringPrefix(
+    str: string | Buffer,
+    prefixCallBackFn?: (length: number) => Buffer | undefined,
+    offset?: number
+  ) {
     const buf = (prefixCallBackFn && prefixCallBackFn(Buffer.byteLength(str))) || undefined;
     return this.write(buf ? Buffer.concat([buf, Buffer.from(str)]) : Buffer.from(str), offset);
   }

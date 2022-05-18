@@ -2,7 +2,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as zlib from "zlib";
 import { Buf } from "./Buf";
-import { IGetLengthFn, IReadStream, RecvAll, RecvStream } from "./RecvStream";
+import { RecvAll } from "./RecvBuf";
+import { IGetLengthFn, IReadStream, RecvStream } from "./RecvStream";
 export class UnZip {
   private dirCache: Set<string> = new Set();
   private outputPath: string;
