@@ -57,20 +57,3 @@ export class ReliableSocket {
     this.socket = this.connect();
   }
 }
-const sock = new ReliableSocket({ host: "110.242.68.66", port: 443 });
-
-sock.getSocket(sock => {
-  console.log(sock.readyState, "有了！");
-  sock.on("close", q => {
-    console.log(q, "关了");
-  });
-});
-
-setTimeout(() => {
-  sock.getSocket(sock => {
-    console.log(sock.readyState, "有了2！");
-    sock.on("close", q => {
-      console.log(q, "关了2");
-    });
-  });
-}, 1000);
