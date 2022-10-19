@@ -44,11 +44,14 @@ export class HttpProxy {
     }
     const url = new URL(req.url[0] === "/" ? `https://${req.headers.host}${req.url}` : req.url);
     /** 判断回环 */
-    if (req.socket.localAddress === this.proxyIp && req.socket.localPort === this.proxyPort) {
-      res.statusCode = 403;
-      res.end("loop");
-      return;
-    }
+    // if (
+    //   (req.socket.address() as any).address === this.proxyIp &&
+    //   (req.socket.address() as any).port === this.proxyPort
+    // ) {
+    //   res.statusCode = 403;
+    //   res.end("loop");
+    //   return;
+    // }
     const httpProxyReq: IHttpProxyReq = {
       method: req.method?.toUpperCase() || "GET",
       url,
