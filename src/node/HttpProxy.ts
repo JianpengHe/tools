@@ -1,115 +1,165 @@
 import * as net from "net";
+import * as tls from "tls";
 import * as http from "http";
+import * as https from "https";
+import * as zlib from "zlib";
+import { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "http";
+import { Duplex, Readable } from "stream";
 export type IHttpProxyReq = {
   method: string;
   url: URL;
-  headers: { [x: string]: string };
+  headers: IncomingHttpHeaders;
   body?: Buffer;
 };
 export type IHttpProxyRes = {
   code: number;
-  headers: { [x: string]: string };
-  body?: Buffer;
+  headers: IncomingHttpHeaders;
+  body?: Buffer | string;
 };
 export type IHttpProxyFn = (
   localReq: IHttpProxyReq
 ) => AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes>;
-const headerParse = (headers: string[], socket: net.Socket) => {
-  const [method, url] = headers.splice(0, 1)[0].split(" ");
-  if (!method || !url) {
-    socket.end();
-    return false;
+const getHostPort = (rawHost: string): [string, number] => {
+  const [_, host, port] = (rawHost || "").match(/^(.+):(\d+)$/) || [];
+  return [host, Number(port || 0)];
+};
+const recvAll = async (stream: Readable | Duplex) => {
+  const body: Buffer[] = [];
+  for await (const chuck of stream) {
+    body.push(chuck);
   }
-  if (url[0] === "/") {
-    socket.end(
-      `HTTP/1.1 404 not found\r\nDate: ${new Date().toUTCString()}\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 3\r\n\r\n404`
-    );
-    return false;
-  }
-  try {
-    const httpProxyReq: IHttpProxyReq = {
-      method: method.toUpperCase(),
-      url: new URL((method.toUpperCase() === "CONNECT" ? "https://" : "") + url),
-      headers: {},
-    };
-    headers.forEach(header => {
-      let p = header.indexOf(":");
-      if (p < 0) {
-        httpProxyReq.headers[header.toLowerCase()] = "";
-      } else {
-        httpProxyReq.headers[header.substring(0, p).trim().toLowerCase()] = header.substring(p + 1).trim();
-      }
-    });
-    headers.length = 0;
-    return httpProxyReq;
-  } catch (e) {
-    socket.end();
-    return false;
-  }
+  return Buffer.concat(body);
 };
 export class HttpProxy {
   private hosts: string[];
+  private proxyPort: number;
+  private proxyIp: string;
   public routeMap: Map<RegExp, IHttpProxyFn>;
   public proxyServer: net.Server;
-  private connectionListener(socket: net.Socket) {
-    socket.once("error", console.error);
-    const headers: string[] = [];
-    let lastBuf = Buffer.allocUnsafe(0);
-    socket.on("readable", () => {
-      // 使用循环来确保读取所有当前可用的数据
-      while (1) {
-        const chunk: Buffer = socket.read();
-        if (!chunk) {
+  private async requestListener(req: IncomingMessage, res: ServerResponse) {
+    if (!req?.headers?.host || !req.url) {
+      res.statusCode = 404;
+      res.end("404");
+      return;
+    }
+    const url = new URL(req.url[0] === "/" ? `https://${req.headers.host}${req.url}` : req.url);
+    /** 判断回环 */
+    if (req.socket.localAddress === this.proxyIp && req.socket.localPort === this.proxyPort) {
+      res.statusCode = 403;
+      res.end("loop");
+      return;
+    }
+    const httpProxyReq: IHttpProxyReq = {
+      method: req.method?.toUpperCase() || "GET",
+      url,
+      headers: req.headers,
+    };
+    let httpProxyFn: AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes> | undefined =
+      undefined;
+    if (this.hosts.includes(url.host)) {
+      for (const [reg, fn] of this.routeMap) {
+        if (reg.test(url.href)) {
+          httpProxyReq.body = await recvAll(req);
+          httpProxyReq.headers["accept-encoding"] = "gzip";
+          httpProxyFn = fn(httpProxyReq);
           break;
         }
-        lastBuf = Buffer.concat([lastBuf, chunk]);
-        let p = 0;
-        while (1) {
-          p = lastBuf.indexOf("\r\n");
-          if (p === -1) {
-            break;
-          }
-          const header = String(lastBuf.subarray(0, p + 2)).trim();
-          lastBuf = lastBuf.subarray(p + 2);
-          if (header) {
-            headers.push(header);
-          } else if (headers.length) {
-            const httpProxyReq = headerParse(headers, socket);
-            if (httpProxyReq) {
-              checkRoute(httpProxyReq);
-            } else {
-              headers.length = 0;
-              lastBuf = Buffer.allocUnsafe(0);
+      }
+    }
+    if (httpProxyFn) {
+      Object.entries((await httpProxyFn.next()).value).forEach(([key, value]) => {
+        httpProxyReq[key] = value;
+      });
+    }
+
+    const remoteReq = (url.protocol === "https:" ? https : http).request(
+      httpProxyReq.url,
+      { method: httpProxyReq.method, headers: httpProxyReq.headers },
+      async remoteRes => {
+        /** 需要走拦截 */
+        if (httpProxyFn) {
+          const httpProxyRes: IHttpProxyRes = {
+            code: remoteRes.statusCode || 200,
+            headers: remoteRes.headers,
+          };
+          /** 获取全部body */
+          const body = (httpProxyRes.body = await recvAll(remoteRes));
+          if (body && (httpProxyRes.headers || {})["content-encoding"] === "gzip") {
+            if (
+              !(await new Promise(resolve =>
+                zlib.gunzip(body, (err, buf) => {
+                  if (err) {
+                    console.error(err);
+                    resolve(false);
+                  }
+                  resolve(true);
+                  delete httpProxyRes.headers["content-encoding"];
+                  httpProxyRes.body = buf;
+                })
+              ))
+            ) {
+              res.statusCode = 500;
+              res.end("zlib err");
               return;
             }
           }
+          delete httpProxyRes.headers["content-length"];
+          /** 混合用户修改过的 */
+          Object.entries((await httpProxyFn.next(httpProxyRes)).value).forEach(([key, value]) => {
+            httpProxyRes[key] = value;
+          });
+          res.writeHead(httpProxyRes.code, httpProxyRes.headers);
+          res.end(httpProxyRes.body);
+        } else {
+          res.writeHead(remoteRes.statusCode || 200, remoteRes.headers);
+          remoteRes.pipe(res);
         }
+        remoteRes.once("error", console.error);
       }
-    });
-    const checkRoute = (httpProxyReq: IHttpProxyReq) => {
-      if (httpProxyReq.url.protocol === "http:") {
-        http.request(httpProxyReq.url, { headers: httpProxyReq.headers }, res => {});
-      }
+    );
 
-      if (this.hosts.includes(httpProxyReq.url.host)) {
-        const url = String(httpProxyReq.url);
-        console.log(url);
-        for (const [urlRegExp, httpProxyFn] of this.routeMap) {
-          if (urlRegExp.test(url)) {
-            console.log("命中");
-            // httpProxyFn(httpProxyReq)
-          }
-        }
-      }
-    };
-    // const remoteReq
+    if (httpProxyFn) {
+      remoteReq.end(httpProxyReq.body);
+    } else {
+      req.pipe(remoteReq);
+    }
+    remoteReq?.socket?.on("lookup", (...a) => console.log(a));
+    remoteReq.once("error", () => {
+      console.log("Error\t", req.method, "\t", url.host);
+    });
+    console.log(url.protocol, "\t", req.method, "\t", String(url));
   }
 
-  constructor(hosts: string[], proxyPort?: number) {
+  constructor(hosts: string[], proxyPort: number = 1080, proxyIp: string = "127.0.0.1") {
+    this.proxyIp = proxyIp;
+    this.proxyPort = proxyPort;
     this.hosts = hosts;
     this.routeMap = new Map();
-    this.proxyServer = net.createServer(socket => this.connectionListener(socket)).listen(proxyPort || 1080);
+    this.proxyServer = http.createServer(this.requestListener.bind(this));
+    this.proxyServer.on("connect", ({ headers }, socket) => {
+      const [host, _] = getHostPort(headers.host);
+      if (host) {
+        http
+          .get(`http://127.0.0.1:56482/${host}`, async res => {
+            socket.write(`HTTP/1.1 200 Connection established\r\n\r\n`);
+            const tlsSocket = new tls.TLSSocket(socket, {
+              isServer: true,
+              secureContext: tls.createSecureContext(JSON.parse(String(await recvAll(res)))),
+            });
+            const localSocket = net.connect({ port: proxyPort, host: proxyIp });
+            localSocket.pipe(tlsSocket);
+            tlsSocket.pipe(localSocket);
+            res.once("error", () => {
+              socket.end();
+            });
+          })
+          .once("error", () => {
+            socket.end();
+          });
+      }
+    });
     this.proxyServer.once("error", console.error);
+    this.proxyServer.listen(proxyPort, proxyIp);
   }
   public listen(url: RegExp, fn: IHttpProxyFn) {
     this.routeMap.set(url, fn);
@@ -117,11 +167,11 @@ export class HttpProxy {
   }
 }
 
-new HttpProxy(["mars-test.myscrm.cn"], 80).listen(/list/, async function* (localReq) {
-  console.log(localReq);
-  const remoteReq: Partial<IHttpProxyReq> = {};
-  const remoteRes = yield remoteReq;
-  console.log(remoteRes);
-  const localRes: Partial<IHttpProxyRes> = {};
-  return localRes;
-});
+// new HttpProxy(["www.baidu.com"], 80).listen(/.+/, async function* (localReq) {
+//   // console.log(localReq);
+//   const remoteReq: Partial<IHttpProxyReq> = {};
+//   const remoteRes = yield remoteReq;
+//   // console.log(remoteRes);
+//   const localRes: Partial<IHttpProxyRes> = { body: "禁止访问百度" };
+//   return localRes;
+// });
