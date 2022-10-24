@@ -32,8 +32,6 @@ const recvAll = async (stream: Readable | Duplex) => {
 };
 export class HttpProxy {
   private hosts: string[];
-  private proxyPort: number;
-  private proxyIp: string;
   public routeMap: Map<RegExp, IHttpProxyFn>;
   public proxyServer: net.Server;
   private async requestListener(req: IncomingMessage, res: ServerResponse) {
@@ -42,16 +40,14 @@ export class HttpProxy {
       res.end("404");
       return;
     }
-    const url = new URL(req.url[0] === "/" ? `https://${req.headers.host}${req.url}` : req.url);
+    const encrypted = req.socket["encrypt" + "ed"];
     /** 判断回环 */
-    // if (
-    //   (req.socket.address() as any).address === this.proxyIp &&
-    //   (req.socket.address() as any).port === this.proxyPort
-    // ) {
-    //   res.statusCode = 403;
-    //   res.end("loop");
-    //   return;
-    // }
+    if (!encrypted && req.url[0] === "/") {
+      res.statusCode = 403;
+      res.end("proxyServer");
+      return;
+    }
+    const url = new URL(encrypted ? `https://${req.headers.host}${req.url}` : req.url);
     const httpProxyReq: IHttpProxyReq = {
       method: req.method?.toUpperCase() || "GET",
       url,
@@ -134,8 +130,6 @@ export class HttpProxy {
   }
 
   constructor(hosts: string[], proxyPort: number = 1080, proxyIp: string = "127.0.0.1") {
-    this.proxyIp = proxyIp;
-    this.proxyPort = proxyPort;
     this.hosts = hosts;
     this.routeMap = new Map();
     this.proxyServer = http.createServer(this.requestListener.bind(this));
@@ -149,9 +143,10 @@ export class HttpProxy {
               isServer: true,
               secureContext: tls.createSecureContext(JSON.parse(String(await recvAll(res)))),
             });
-            const localSocket = net.connect({ port: proxyPort, host: proxyIp });
-            localSocket.pipe(tlsSocket);
-            tlsSocket.pipe(localSocket);
+            // const localSocket = net.connect({ port: proxyPort, host: proxyIp });
+            // localSocket.pipe(tlsSocket);
+            // tlsSocket.pipe(localSocket);
+            this.proxyServer.emit("connection", tlsSocket);
             res.once("error", () => {
               socket.end();
             });
@@ -170,7 +165,7 @@ export class HttpProxy {
   }
 }
 
-// new HttpProxy(["www.baidu.com"], 80).listen(/.+/, async function* (localReq) {
+// new HttpProxy(["www.baidu.com"], 1080).listen(/.+/, async function* (localReq) {
 //   // console.log(localReq);
 //   const remoteReq: Partial<IHttpProxyReq> = {};
 //   const remoteRes = yield remoteReq;
