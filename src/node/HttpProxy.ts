@@ -136,8 +136,8 @@ export class HttpProxy {
     this.proxyServer.on("connect", ({ headers }, socket) => {
       const [host, _] = getHostPort(headers.host);
       if (host) {
-        http
-          .get(`http://127.0.0.1:56482/${host}`, async res => {
+        https
+          .get(`https://tool.hejianpeng.cn/certificate/${host}`, async res => {
             socket.write(`HTTP/1.1 200 Connection established\r\n\r\n`);
             const tlsSocket = new tls.TLSSocket(socket, {
               isServer: true,
@@ -164,7 +164,7 @@ export class HttpProxy {
     return this;
   }
 }
-
+console.warn("使用前请先下载并安装CA根证书，下载地址https://tool.hejianpeng.cn/certificate/");
 // new HttpProxy(["www.baidu.com"], 1080).listen(/.+/, async function* (localReq) {
 //   // console.log(localReq);
 //   const remoteReq: Partial<IHttpProxyReq> = {};
