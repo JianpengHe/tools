@@ -167,7 +167,6 @@ export class HttpProxy {
     return this;
   }
 }
-console.warn("使用前请先下载并安装CA根证书，下载地址https://tool.hejianpeng.cn/certificate/");
 // new HttpProxy(["www.baidu.com"], 1080).listen(/.+/, async function* (localReq) {
 //   console.log(String(localReq.body));
 //   const remoteReq: Partial<IHttpProxyReq> = {};
