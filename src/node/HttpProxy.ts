@@ -136,8 +136,8 @@ export class HttpProxy {
     this.proxyServer.on("connect", ({ headers }, socket) => {
       const [host, _] = getHostPort(headers.host);
       if (host) {
-        http
-          .get(`http://127.0.0.1:56482/${host}`, async res => {
+        https
+          .get(`https://tool.hejianpeng.cn/certificate/${host}`, async res => {
             socket.write(`HTTP/1.1 200 Connection established\r\n\r\n`);
             const tlsSocket = new tls.TLSSocket(socket, {
               isServer: true,
@@ -158,18 +158,20 @@ export class HttpProxy {
     });
     this.proxyServer.once("error", console.error);
     this.proxyServer.listen(proxyPort, proxyIp);
+    console.warn(
+      `使用前请先下载并安装CA根证书，下载地址https://tool.hejianpeng.cn/certificate/，并进入系统设置代理服务器${proxyIp}:${proxyPort}`
+    );
   }
   public listen(url: RegExp, fn: IHttpProxyFn) {
     this.routeMap.set(url, fn);
     return this;
   }
 }
-
 // new HttpProxy(["www.baidu.com"], 1080).listen(/.+/, async function* (localReq) {
-//   // console.log(localReq);
+//   console.log(String(localReq.body));
 //   const remoteReq: Partial<IHttpProxyReq> = {};
 //   const remoteRes = yield remoteReq;
-//   // console.log(remoteRes);
+//   console.log(String(remoteRes.body));
 //   const localRes: Partial<IHttpProxyRes> = { body: "禁止访问百度" };
 //   return localRes;
 // });
