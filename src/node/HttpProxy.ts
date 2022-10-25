@@ -126,7 +126,7 @@ export class HttpProxy {
     remoteReq.once("error", () => {
       console.log("Error\t", req.method, "\t", url.host);
     });
-    console.log(url.protocol, "\t", req.method, "\t", String(url));
+    // console.log(url.protocol, "\t", req.method, "\t", String(url));
   }
 
   constructor(hosts: string[], proxyPort: number = 1080, proxyIp: string = "127.0.0.1") {
