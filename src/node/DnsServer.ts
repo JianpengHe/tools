@@ -72,7 +72,7 @@ export class DnsServer {
   private killBindPort = (port: number) =>
     new Promise(r => {
       if (os.platform() === "win32") {
-        child_process.exec(`netstat -aon|findstr "${this.udpServerHost}:${port}"`, (err, stdout) => {
+        child_process.exec(`netstat -aon -p UDP|findstr "${this.udpServerHost}:${port}"`, (err, stdout) => {
           if (!err && String(stdout)) {
             const pidInfo = String(stdout).trim().split("\n");
             if (pidInfo.length) {
