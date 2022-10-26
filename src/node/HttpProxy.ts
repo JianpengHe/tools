@@ -3,6 +3,7 @@ import * as tls from "tls";
 import * as http from "http";
 import * as https from "https";
 import * as zlib from "zlib";
+import * as child_process from "child_process";
 import { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "http";
 import { Duplex, Readable } from "stream";
 export type IHttpProxyReq = {
@@ -122,11 +123,18 @@ export class HttpProxy {
     } else {
       req.pipe(remoteReq);
     }
-    remoteReq?.socket?.on("lookup", (...a) => console.log(a));
     remoteReq.once("error", () => {
-      console.log("Error\t", req.method, "\t", url.host);
+      console.log("\x1B[31mError\t", req.method, "\t", url.host, "\x1B[0m");
     });
-    // console.log(url.protocol, "\t", req.method, "\t", String(url));
+    console.log(
+      url.protocol,
+      "\t",
+      String(req.method || "").padEnd(7, " "),
+      "\t",
+      await getProcessByPort(req.socket.remotePort, req.socket.localPort),
+      "\t",
+      String(url).substring(0, 100) + (String(url).length > 100 ? "..." : "")
+    );
   }
 
   constructor(hosts: string[], proxyPort: number = 1080, proxyIp: string = "127.0.0.1") {
@@ -167,6 +175,37 @@ export class HttpProxy {
     return this;
   }
 }
+
+const getProcessByPort = (remotePort: number = 0, localPort: number = 0) =>
+  new Promise(resolve =>
+    child_process.exec(`netstat -aonp TCP |findstr ":${remotePort}"`, (err, data) => {
+      if (err) {
+        resolve("");
+        return;
+      }
+      const pid = (String(data).match(
+        new RegExp(
+          `TCP\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${remotePort}\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${localPort}\\s+\\S+\\s+(\\d+)`
+        )
+      ) || [])[1];
+      if (!pid) {
+        resolve("");
+        return;
+      }
+      child_process.exec(`tasklist /FI "PID eq ${pid}" /NH`, (err, data) =>
+        resolve(
+          (
+            (!err &&
+              (String(data)
+                .trim()
+                .match(new RegExp(`^(.+?)\\s+${pid}`)) || [])[1]) ||
+            ""
+          ).trim()
+        )
+      );
+    })
+  );
+
 // new HttpProxy(["www.baidu.com"], 1080).listen(/.+/, async function* (localReq) {
 //   console.log(String(localReq.body));
 //   const remoteReq: Partial<IHttpProxyReq> = {};
