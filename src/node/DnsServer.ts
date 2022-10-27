@@ -11,7 +11,13 @@ process.on("SIGTERM", () => process.exit(1002));
 export class DnsServer {
   public dnsServerIp = (dns.getServers() || [])[0];
   public udpServer = dgram.createSocket("udp4");
-  public hostsMap: Map<string, string>;
+  public hostsMap: Map<
+    string,
+    {
+      original: string;
+      current: string;
+    }
+  >;
   private udpServerHost: string;
   private parseHost(msg: Buffer) {
     let num = 0;
@@ -25,10 +31,10 @@ export class DnsServer {
   private async onMessage(msg: Buffer, rinfo: dgram.RemoteInfo) {
     const host = this.parseHost(msg.subarray(12));
 
-    const ip = this.hostsMap.get(host);
-    if (ip) {
+    const { current } = this.hostsMap.get(host) || {};
+    if (current) {
       console.log("DNS Server\t", "自定义\t", host);
-      this.resolve(ip, msg, rinfo);
+      this.resolve(current, msg, rinfo);
       return;
     }
     console.log("DNS Server\t", "转发\t", host);
@@ -134,8 +140,16 @@ export class DnsServer {
   }
 
   public add(ip: string, host: string) {
-    this.hostsMap.set(host, ip);
+    dns.resolve4(host, (err, addresses) => {
+      if (!err && addresses && addresses[0]) {
+        this.hostsMap.set(host, { original: addresses[0], current: ip });
+      }
+    });
+
     return this.hostsMap;
+  }
+  public getRawIp(host: string) {
+    return this.hostsMap.get(host)?.original;
   }
 }
 
