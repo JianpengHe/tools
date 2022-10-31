@@ -16,6 +16,7 @@
     "outDir": "./dist",
     "listFiles": true, // 包含了哪些库，这个必要的时候还是很有用的
     "listEmittedFiles": true,
+    "declaration": true,
     "lib": [
       // 要那些 lib，按需选择即可
       "es2016"
@@ -33,5 +34,5 @@
   // file include会算出一个交集, 指明哪些是项目的 ts 文件
   "include": ["./**/*"],
   // 排除项目下面不符合要求的文件，这个按需设定即可，可以放心排除乱七八糟的文件
-  "exclude": ["node_modules", "**/*.spec.ts", "*.js"]
+  "exclude": ["node_modules", "**/*.spec.ts", "*.js", "./dist/**/*"]
 }

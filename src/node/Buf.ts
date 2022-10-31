@@ -9,26 +9,26 @@ export class Buf {
   public UIntLEToBuffer(number: number, byteLength?: number) {
     const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
     if (!number) {
-      return buf.slice(0, byteLength ?? 1).fill(number);
+      return buf.subarray(0, byteLength ?? 1).fill(number);
     }
     let index = 0;
     while (number > 0) {
       buf[index++] = number % 256;
       number = Math.floor(number / 256);
     }
-    return byteLength ? buf : buf.slice(0, index);
+    return byteLength ? buf : buf.subarray(0, index);
   }
   public UIntBEToBuffer(number: number, byteLength?: number) {
     const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
     if (!number) {
-      return buf.slice(0, byteLength ?? 1).fill(number);
+      return buf.subarray(0, byteLength ?? 1).fill(number);
     }
     let index = buf.length;
     while (number > 0) {
       buf[--index] = number % 256;
       number = Math.floor(number / 256);
     }
-    return byteLength ? buf : buf.slice(index);
+    return byteLength ? buf : buf.subarray(index);
   }
   public alloc(length: number, fill?: number) {
     const buf = Buffer.allocUnsafe(length);
@@ -44,14 +44,14 @@ export class Buf {
   public read(length: number, offset?: number): Buffer {
     offset = offset ?? this.offset;
     length = length < 0 ? this.buffer.length - offset : length;
-    this.lastReadValue = this.buffer.slice(offset, (offset += length));
+    this.lastReadValue = this.buffer.subarray(offset, (offset += length));
     this.offset = Math.min(offset, this.buffer.length);
     return this.lastReadValue;
   }
   public readString(length?: number, offset?: number): string {
     offset = offset ?? this.offset;
-    this.lastReadValue = String(this.read(length || this.buffer.indexOf(0, offset) - offset, offset));
-    if (!length) {
+    this.lastReadValue = String(this.read(length ?? this.buffer.indexOf(0, offset) - offset, offset));
+    if (length === undefined) {
       this.offset = Math.min(this.offset + 1, this.buffer.length);
     }
     return this.lastReadValue;
