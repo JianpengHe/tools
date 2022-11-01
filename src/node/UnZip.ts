@@ -2,8 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as zlib from "zlib";
 import { Buf } from "./Buf";
-import { RecvAll } from "./RecvBuf";
-import { IGetLengthFn, IReadStream, RecvStream } from "./RecvStream";
+import { IReadStream } from "./IReadStream";
+import { recvAll } from "./RecvBuf";
+import { IGetLengthFn, RecvStream } from "./RecvStream";
 export class UnZip {
   private dirCache: Set<string> = new Set();
   private outputPath: string;
@@ -58,7 +59,7 @@ export class UnZip {
     needReadFileName();
     const writeFile = () => {
       if (!info.compressedSize) {
-        RecvAll(ReadStream);
+        recvAll(ReadStream);
         return;
       }
       if (info.compressionMethod === 8 || info.compressionMethod === 9) {

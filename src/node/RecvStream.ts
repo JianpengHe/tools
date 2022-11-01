@@ -1,5 +1,5 @@
-import { Readable, Duplex } from "stream";
-export type IReadStream = Readable | Duplex;
+import * as stream from "stream";
+import { IReadStream } from "./IReadStream";
 export type IReadBufferFn = (readLength: number) => SubReadStream;
 export type IGetLengthFn = (headerBuf: Buffer, readBufferFn: IReadBufferFn) => void;
 export class RecvStream {
@@ -41,7 +41,7 @@ export class RecvStream {
   }
 }
 
-export class SubReadStream extends Readable {
+export class SubReadStream extends stream.Readable {
   public stream: IReadStream;
   public canRecvSize: number;
   public needReadSize: number;

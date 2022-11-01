@@ -1,6 +1,5 @@
-import { Readable, Duplex } from "stream";
-export type IReadStream = Readable | Duplex;
-export const RecvAll = (stream: IReadStream): Promise<Buffer> =>
+import { IReadStream } from "./IReadStream";
+export const recvAll = (stream: IReadStream): Promise<Buffer> =>
   new Promise((resolve, reject) => {
     const body: Buffer[] = [];
     stream.on("data", chuck => body.push(chuck));

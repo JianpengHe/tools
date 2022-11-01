@@ -2,7 +2,7 @@ import { Buf } from "./Buf";
 import { IGetLengthFn, RecvStream } from "./RecvStream";
 import * as net from "net";
 import * as crypto from "crypto";
-import { RecvAll } from "./RecvBuf";
+import { recvAll } from "./RecvBuf";
 const showTCPpacket = 0;
 const Log = (...msg) => {
   //  console.log(...msg);
@@ -169,7 +169,7 @@ export class Mysql {
     this.lastRecvLen = len;
     const index = buf.readUIntLE(1);
     const type = buf.readUIntLE(1);
-    const dataBuffer = await RecvAll(readBufferFn(len - 1));
+    const dataBuffer = await recvAll(readBufferFn(len - 1));
     // OK 响应报文	0x00
     // Error 响应报文	0xFF
     // Result Set 报文	0x01 - 0xFA

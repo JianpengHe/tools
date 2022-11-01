@@ -5,26 +5,26 @@ import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
 import * as child_process from "child_process";
-import { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "http";
-import { Duplex, Readable } from "stream";
 import { DnsServer } from "./DnsServer";
+import { recvAll } from "./RecvBuf";
+
 /** 使用PG的公共证书签发平台 */
 const certificateCenter = "https://tool.hejianpeng.cn/certificate/";
 export type IHttpProxyReq = {
   method: string;
   url: URL;
-  headers: IncomingHttpHeaders;
+  headers: http.IncomingHttpHeaders;
   body?: Buffer;
 };
 export type IHttpProxyRes = {
   code: number;
-  headers: IncomingHttpHeaders;
+  headers: http.IncomingHttpHeaders;
   body?: Buffer | string;
 };
 export type IHttpProxyFn = (
   localReq: IHttpProxyReq
 ) => AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes>;
-export type IHttpProxyRegFn = (method: string, url: URL, headers: IncomingHttpHeaders) => boolean;
+export type IHttpProxyRegFn = (method: string, url: URL, headers: http.IncomingHttpHeaders) => boolean;
 
 export type IHttpProxyOpt = {
   runWith?: "httpProxy" | "modifyHostsFile" | "dns";
@@ -38,13 +38,7 @@ const getHostPort = (rawHost: string): [string, number] => {
   const [_, host, port] = (rawHost || "").match(/^(.+):(\d+)$/) || [];
   return [host, Number(port || 0)];
 };
-const recvAll = async (stream: Readable | Duplex) => {
-  const body: Buffer[] = [];
-  for await (const chuck of stream) {
-    body.push(chuck);
-  }
-  return Buffer.concat(body);
-};
+
 export const createSecureContext = async (host: string): Promise<tls.SecureContext> =>
   new Promise((resolve, reject) => {
     https
@@ -74,159 +68,161 @@ export class HttpProxy {
   public readonly routeMap: Map<IHttpProxyRegFn, IHttpProxyFn>;
   /** 对外请求的代理服务器 */
   private readonly opt: IHttpProxyOpt;
-  public readonly proxyServer: net.Server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const encrypted = req.socket["encrypt" + "ed"];
-    if (!encrypted && req.url === `/pg_pac_script_config`) {
-      console.log("读取PAC脚本", await getProcessByPort(req.socket.remotePort, req.socket.localPort));
-      res.end(`function FindProxyForURL(url, host) {
+  public readonly proxyServer: net.Server = http.createServer(
+    async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      const encrypted = req.socket["encrypt" + "ed"];
+      if (!encrypted && req.url === `/pg_pac_script_config`) {
+        console.log("读取PAC脚本", await getProcessByPort(req.socket.remotePort, req.socket.localPort));
+        res.end(`function FindProxyForURL(url, host) {
         if (${this.hosts.map(host => `dnsDomainIs(host, "${host}")`).join("||")}) {
           return "PROXY ${this.opt.proxyBindIp}:${this.opt.proxyBindPort}; DIRECT";
         } else {
           return "DIRECT";
         }
       }`);
-      return;
-    }
-    if (!req?.headers?.host || !req.url) {
-      res.statusCode = 404;
-      res.end("404");
-      return;
-    }
-    /** 判断回环的几种方法，但还没定下来最好的方法。。。 */
-    if (req.headers["pg_no_loop_token"] === this.token) {
-      res.end("loop");
-      return;
-    }
-    req.headers["pg_no_loop_token"] = this.token;
-
-    // if (!encrypted && req.url[0] === "/") {
-    //   res.statusCode = 403;
-    //   res.end("proxyServer");
-    //   return;
-    // }
-
-    const url = new URL(req.url[0] === "/" ? `http${encrypted ? "s" : ""}://${req.headers.host}${req.url}` : req.url);
-    // if (url.protocol === "http:") {
-    //   url.port = url.port || "80";
-    //   if (url.port === "1080") {
-    //     const hosts: string[] = net.isIPv4(url.hostname)
-    //       ? [url.hostname]
-    //       : await new Promise(r => {
-    //           dns.resolve4(url.hostname, (err, ad) => r(ad || []));
-    //         });
-    //     if (hosts.includes("127.0.0.1")) {
-    //       res.end("loop");
-    //       return;
-    //     }
-    //     console.log(hosts);
-    //   }
-    // }
-    /** 判断回环END */
-
-    /** 浏览器到代理服务器的req句柄，交由开发者修改后，使用该req句柄请求远端服务器 */
-    const httpProxyReq: IHttpProxyReq = {
-      method: req.method?.toUpperCase() || "GET",
-      url,
-      headers: req.headers,
-    };
-
-    /** 开发者修改请求的函数 */
-    let httpProxyFn: AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes> | undefined =
-      undefined;
-
-    /** 如果域名在hosts列表中，才交给开发者处理 */
-    if (this.hosts.includes(url.host)) {
-      for (const [regFn, fn] of this.routeMap) {
-        /**看满足哪条“代理规则” */
-        if (regFn(httpProxyReq.method, url, httpProxyReq.headers)) {
-          httpProxyReq.body = await recvAll(req);
-          httpProxyReq.headers["accept-encoding"] = "gzip";
-          httpProxyFn = fn(httpProxyReq);
-          break;
-        }
+        return;
       }
-    }
+      if (!req?.headers?.host || !req.url) {
+        res.statusCode = 404;
+        res.end("404");
+        return;
+      }
+      /** 判断回环的几种方法，但还没定下来最好的方法。。。 */
+      if (req.headers["pg_no_loop_token"] === this.token) {
+        res.end("loop");
+        return;
+      }
+      req.headers["pg_no_loop_token"] = this.token;
 
-    httpProxyReq.headers.host = url.host;
-    url.hostname = this.hostsOriginalIpMap.get(url.hostname) || url.hostname;
-    // if (this.dnsServer) {
-    //   httpProxyReq.headers.host = url.host;
-    //   url.hostname = this.dnsServer.getRawIp(url.hostname) || url.hostname;
-    //   console.log(url, httpProxyReq.headers);
-    // }
+      // if (!encrypted && req.url[0] === "/") {
+      //   res.statusCode = 403;
+      //   res.end("proxyServer");
+      //   return;
+      // }
 
-    /** 如果存在这个“开发者修改请求的函数”，说明开发者需要修改了 */
-    if (httpProxyFn) {
-      Object.entries((await httpProxyFn.next()).value).forEach(([key, value]) => {
-        httpProxyReq[key] = value;
-      });
-    }
+      const url = new URL(req.url[0] === "/" ? `http${encrypted ? "s" : ""}://${req.headers.host}${req.url}` : req.url);
+      // if (url.protocol === "http:") {
+      //   url.port = url.port || "80";
+      //   if (url.port === "1080") {
+      //     const hosts: string[] = net.isIPv4(url.hostname)
+      //       ? [url.hostname]
+      //       : await new Promise(r => {
+      //           dns.resolve4(url.hostname, (err, ad) => r(ad || []));
+      //         });
+      //     if (hosts.includes("127.0.0.1")) {
+      //       res.end("loop");
+      //       return;
+      //     }
+      //     console.log(hosts);
+      //   }
+      // }
+      /** 判断回环END */
 
-    const remoteReq = (url.protocol === "https:" ? https : http).request(
-      httpProxyReq.url,
-      { method: httpProxyReq.method, headers: httpProxyReq.headers },
-      async remoteRes => {
-        /** 需要走拦截 */
-        if (httpProxyFn) {
-          const httpProxyRes: IHttpProxyRes = {
-            code: remoteRes.statusCode || 200,
-            headers: remoteRes.headers,
-          };
-          /** 获取全部body */
-          const body = (httpProxyRes.body = await recvAll(remoteRes));
-          if (body && (httpProxyRes.headers || {})["content-encoding"] === "gzip") {
-            if (
-              !(await new Promise(resolve =>
-                zlib.gunzip(body, (err, buf) => {
-                  if (err) {
-                    console.error(err);
-                    resolve(false);
-                  }
-                  resolve(true);
-                  delete httpProxyRes.headers["content-encoding"];
-                  httpProxyRes.body = buf;
-                })
-              ))
-            ) {
-              res.statusCode = 500;
-              res.end("zlib err");
-              return;
-            }
+      /** 浏览器到代理服务器的req句柄，交由开发者修改后，使用该req句柄请求远端服务器 */
+      const httpProxyReq: IHttpProxyReq = {
+        method: req.method?.toUpperCase() || "GET",
+        url,
+        headers: req.headers,
+      };
+
+      /** 开发者修改请求的函数 */
+      let httpProxyFn: AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes> | undefined =
+        undefined;
+
+      /** 如果域名在hosts列表中，才交给开发者处理 */
+      if (this.hosts.includes(url.host)) {
+        for (const [regFn, fn] of this.routeMap) {
+          /**看满足哪条“代理规则” */
+          if (regFn(httpProxyReq.method, url, httpProxyReq.headers)) {
+            httpProxyReq.body = await recvAll(req);
+            httpProxyReq.headers["accept-encoding"] = "gzip";
+            httpProxyFn = fn(httpProxyReq);
+            break;
           }
-          delete httpProxyRes.headers["content-length"];
-          /** 混合用户修改过的 */
-          Object.entries((await httpProxyFn.next(httpProxyRes)).value).forEach(([key, value]) => {
-            httpProxyRes[key] = value;
-          });
-          res.writeHead(httpProxyRes.code, httpProxyRes.headers);
-          res.end(httpProxyRes.body);
-        } else {
-          res.writeHead(remoteRes.statusCode || 200, remoteRes.headers);
-          remoteRes.pipe(res);
         }
-        remoteRes.once("error", console.error);
       }
-    );
-    remoteReq.once("error", () => {
-      console.log("\x1B[31mError\t", req.method, "\t", url.host, "\x1B[0m");
-    });
-    if (httpProxyFn) {
-      remoteReq.end(httpProxyReq.body);
-    } else {
-      req.pipe(remoteReq);
+
+      httpProxyReq.headers.host = url.host;
+      url.hostname = this.hostsOriginalIpMap.get(url.hostname) || url.hostname;
+      // if (this.dnsServer) {
+      //   httpProxyReq.headers.host = url.host;
+      //   url.hostname = this.dnsServer.getRawIp(url.hostname) || url.hostname;
+      //   console.log(url, httpProxyReq.headers);
+      // }
+
+      /** 如果存在这个“开发者修改请求的函数”，说明开发者需要修改了 */
+      if (httpProxyFn) {
+        Object.entries((await httpProxyFn.next()).value).forEach(([key, value]) => {
+          httpProxyReq[key] = value;
+        });
+      }
+
+      const remoteReq = (url.protocol === "https:" ? https : http).request(
+        httpProxyReq.url,
+        { method: httpProxyReq.method, headers: httpProxyReq.headers },
+        async remoteRes => {
+          /** 需要走拦截 */
+          if (httpProxyFn) {
+            const httpProxyRes: IHttpProxyRes = {
+              code: remoteRes.statusCode || 200,
+              headers: remoteRes.headers,
+            };
+            /** 获取全部body */
+            const body = (httpProxyRes.body = await recvAll(remoteRes));
+            if (body && (httpProxyRes.headers || {})["content-encoding"] === "gzip") {
+              if (
+                !(await new Promise(resolve =>
+                  zlib.gunzip(body, (err, buf) => {
+                    if (err) {
+                      console.error(err);
+                      resolve(false);
+                    }
+                    resolve(true);
+                    delete httpProxyRes.headers["content-encoding"];
+                    httpProxyRes.body = buf;
+                  })
+                ))
+              ) {
+                res.statusCode = 500;
+                res.end("zlib err");
+                return;
+              }
+            }
+            delete httpProxyRes.headers["content-length"];
+            /** 混合用户修改过的 */
+            Object.entries((await httpProxyFn.next(httpProxyRes)).value).forEach(([key, value]) => {
+              httpProxyRes[key] = value;
+            });
+            res.writeHead(httpProxyRes.code, httpProxyRes.headers);
+            res.end(httpProxyRes.body);
+          } else {
+            res.writeHead(remoteRes.statusCode || 200, remoteRes.headers);
+            remoteRes.pipe(res);
+          }
+          remoteRes.once("error", console.error);
+        }
+      );
+      remoteReq.once("error", () => {
+        console.log("\x1B[31mError\t", req.method, "\t", url.host, "\x1B[0m");
+      });
+      if (httpProxyFn) {
+        remoteReq.end(httpProxyReq.body);
+      } else {
+        req.pipe(remoteReq);
+      }
+      const showUrl = new URL(String(url));
+      showUrl.host = httpProxyReq.headers.host;
+      console.log(
+        showUrl.protocol,
+        "\t",
+        String(req.method || "").padEnd(7, " "),
+        "\t",
+        await getProcessByPort(req.socket.remotePort, req.socket.localPort),
+        "\t",
+        String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : "")
+      );
     }
-    const showUrl = new URL(String(url));
-    showUrl.host = httpProxyReq.headers.host;
-    console.log(
-      showUrl.protocol,
-      "\t",
-      String(req.method || "").padEnd(7, " "),
-      "\t",
-      await getProcessByPort(req.socket.remotePort, req.socket.localPort),
-      "\t",
-      String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : "")
-    );
-  });
+  );
   private dnsServer?: DnsServer;
   constructor(hosts: string[], opt: IHttpProxyOpt = {}) {
     this.hosts = hosts || [];
