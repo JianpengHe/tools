@@ -4,7 +4,8 @@
   "description": "一些常用的工具和函数",
   "main": "index.ts",
   "scripts": {
-    "test": "./node_modules/.bin/tsc && node --inspect dist/index.js"
+    "test": "./node_modules/.bin/tsc && node --inspect dist/index.js",
+    "release": "node release"
   },
   "author": "JianpengHe",
   "license": "ISC",
