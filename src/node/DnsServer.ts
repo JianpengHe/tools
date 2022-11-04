@@ -1,13 +1,6 @@
 import * as dns from "dns";
-import * as os from "os";
 import * as dgram from "dgram";
-import * as child_process from "child_process";
-process.on("uncaughtException", e => {
-  console.error("DNS Server\t", e);
-  process.exit(1000);
-});
-process.on("SIGINT", () => process.exit(1001));
-process.on("SIGTERM", () => process.exit(1002));
+import { getOccupiedNetworkPortPids, setDnsAddr } from "./systemNetworkSettings";
 export class DnsServer {
   public dnsServerIp = (dns.getServers() || [])[0];
   public udpServer = dgram.createSocket("udp4");
@@ -75,65 +68,44 @@ export class DnsServer {
       }
     });
   }
-  private killBindPort = (port: number) =>
+  private killBindPort = (port: number, autoSettings: boolean) =>
     new Promise(r => {
-      if (os.platform() === "win32") {
-        child_process.exec(`netstat -aon -p UDP|findstr "${this.udpServerHost}:${port}"`, (err, stdout) => {
-          if (!err && String(stdout)) {
-            const pidInfo = String(stdout).trim().split("\n");
-            if (pidInfo.length) {
-              pidInfo.forEach(line => {
-                const pid = (line.match(
-                  new RegExp(`^UDP\\s+${this.udpServerHost.replace(/\./g, "\\.")}\\:53\\s+[^\\d]*(\\d+)$`)
-                ) || [])[1];
-                if (pid) {
-                  console.log("DNS Server\t", "杀死进程", "占用端口的进程pid:", pid);
-                  process.kill(Number(pid));
-                }
-              });
-            }
-          }
-          setTimeout(() => r(0), 1000);
-        });
-        this.udpServer.once("listening", () => {
-          const addr = this.udpServer.address();
-          console.log("DNS Server\t", "启动成功", `${addr.address}:${addr.port}`);
-          const names = Object.entries(os.networkInterfaces())
-            .map(([name, infos]) => {
-              if (infos?.find(({ internal, family }) => !internal && family === "IPv4")) {
-                return name;
-              }
-              return false;
-            })
-            .filter(a => a);
-          names.forEach(name =>
-            child_process.exec(
-              `netsh interface ipv4 set dns name="${name}" source=static addr=${this.udpServerHost} register=PRIMARY & ipconfig/flushdns`,
-              () => {
-                console.log("DNS Server\t", "自动配置", name);
-              }
-            )
-          );
-          process.on("exit", function (code) {
-            child_process.execSync(
-              names.map(name => `netsh interface ipv4 set dns name="${name}" source = dhcp`).join(" & ") +
-                "& ipconfig/flushdns & netsh winsock reset"
-            );
+      if (autoSettings) {
+        getOccupiedNetworkPortPids(port, this.udpServerHost, "UDP")
+          .then(pids => {
+            pids.forEach(pid => {
+              process.kill(pid);
+              console.log("DNS Server\t", "杀死进程", "占用端口的进程pid:", pid);
+            });
+          })
+          .finally(() => {
+            setTimeout(() => r(0), 1000);
           });
-        });
-        return;
       }
-      r(0);
+
+      this.udpServer.once("listening", () => {
+        const addr = this.udpServer.address();
+        console.log("DNS Server\t", "启动成功", `${addr.address}:${addr.port}`);
+        if (autoSettings) {
+          setDnsAddr(this.udpServerHost)
+            .then(networks => {
+              networks.forEach(network => console.log("DNS Server\t", "自动配置", network));
+            })
+            .catch(e => {
+              console.log("DNS Server\t", "自动配置失败", e);
+            });
+        }
+      });
     });
 
-  constructor(port: number = 53, host: string = "127.0.0.2") {
+  constructor(port: number = 53, host: string = "127.0.0.2", autoSettings: boolean = true) {
     if (this.dnsServerIp === host) {
       this.dnsServerIp = "119.29.29.29";
     }
     console.log("DNS Server\t", "远程地址", this.dnsServerIp);
     this.hostsMap = new Map();
     this.udpServerHost = host;
-    this.killBindPort(port).then(() => {
+    this.killBindPort(port, autoSettings).then(() => {
       this.udpServer.bind(port, host);
       this.udpServer.on("message", this.onMessage.bind(this));
     });

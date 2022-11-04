@@ -1,5 +1,6 @@
 import * as child_process from "child_process";
 import * as os from "os";
+import { afterExit } from "./afterExit";
 import { Buf } from "./Buf";
 
 export type IProxyWinOpt = {
@@ -17,6 +18,8 @@ export type IProxyWinOpt = {
   noProxyIps?: string;
   pac?: string;
 };
+
+/** 查看/设置HTTP代理 */
 export const setProxyWin = async (newOpt?: IProxyWinOpt) => {
   if (os.platform() !== "win32") {
     throw new Error("Microsoft Windows Only!");
@@ -101,3 +104,111 @@ export const setProxyWin = async (newOpt?: IProxyWinOpt) => {
 //     })
 //   );
 // })();
+
+/** 设置DNS服务器 */
+export const setDnsAddr = async (addr: string, autoReset = true) => {
+  if (os.platform() !== "win32") {
+    throw new Error("Microsoft Windows Only!");
+  }
+  const names = Object.entries(os.networkInterfaces())
+    .map(([name, infos]) => {
+      if (infos?.find(({ internal, family }) => !internal && family === "IPv4")) {
+        return name;
+      }
+      return false;
+    })
+    .filter(a => a);
+  if (autoReset) {
+    afterExit(() => {
+      child_process.execSync(
+        names.map(name => `netsh interface ipv4 set dns name="${name}" source = dhcp`).join(" & ") +
+          "& ipconfig/flushdns & netsh winsock reset"
+      );
+    });
+  }
+
+  await Promise.all(
+    names.map(
+      name =>
+        new Promise((resolve, reject) =>
+          child_process.exec(
+            `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY & ipconfig/flushdns`,
+            err => {
+              if (err) {
+                reject(err);
+                return;
+              }
+              // console.log("自动配置DNS", name);
+              resolve(true);
+            }
+          )
+        )
+    )
+  );
+  return names;
+};
+
+// setDnsAddr("114.114.114.114")
+
+/** 占用端口的应用pid */
+export const getOccupiedNetworkPortPids = async (
+  port: number,
+  host: string = "0.0.0.0",
+  protocol: "TCP" | "UDP" = "TCP"
+): Promise<number[]> => {
+  if (os.platform() !== "win32") {
+    throw new Error("Microsoft Windows Only!");
+  }
+  return await new Promise((resolve, reject) =>
+    child_process.exec(`netstat -aon -p ${protocol}|findstr "${host}:${port}"`, (err, stdout) => {
+      const pidInfo = String(stdout || "")
+        .trim()
+        .split("\n");
+      const pids: number[] = [];
+      if (pidInfo.length) {
+        pidInfo.forEach(line => {
+          const pid = (line.match(
+            new RegExp(`^${protocol}\\s+${host.replace(/\./g, "\\.")}\\:${port}\\s+[^\\d]*(\\d+)$`)
+          ) || [])[1];
+          if (pid) {
+            pids.push(Number(pid));
+          }
+        });
+      }
+      resolve(pids);
+    })
+  );
+};
+
+// getOccupiedNetworkPortPids(80,"127.0.0.1","TCP")
+
+/** 通过通信端口，获取应用名称 */
+export const getProcessNameByPort = (remotePort: number = 0, localPort: number = 0) =>
+  new Promise(resolve =>
+    child_process.exec(`netstat -aonp TCP |findstr ":${remotePort}"`, (err, data) => {
+      if (err) {
+        resolve("");
+        return;
+      }
+      const pid = (String(data).match(
+        new RegExp(
+          `TCP\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${remotePort}\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${localPort}\\s+\\S+\\s+(\\d+)`
+        )
+      ) || [])[1];
+      if (!pid) {
+        resolve("");
+        return;
+      }
+      child_process.exec(`tasklist /FI "PID eq ${pid}" /NH`, (err, data) =>
+        resolve(
+          (
+            (!err &&
+              (String(data)
+                .trim()
+                .match(new RegExp(`^(.+?)\\s+${pid}`)) || [])[1]) ||
+            ""
+          ).trim()
+        )
+      );
+    })
+  );

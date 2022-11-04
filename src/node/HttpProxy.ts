@@ -4,9 +4,9 @@ import * as http from "http";
 import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
-import * as child_process from "child_process";
 import { DnsServer } from "./DnsServer";
 import { recvAll } from "./RecvBuf";
+import { getProcessNameByPort, setProxyWin } from "./systemNetworkSettings";
 
 /** 使用PG的公共证书签发平台 */
 const certificateCenter = "https://tool.hejianpeng.cn/certificate/";
@@ -32,6 +32,12 @@ export type IHttpProxyOpt = {
   proxyBindPort?: number; // 1080
   listenRequestPorts?: number[]; //[80,443]
   routeMap?: Map<IHttpProxyRegFn, IHttpProxyFn>;
+
+  /** 是否自动完成系统设置 */
+  autoSettings?: boolean;
+
+  /** 是否显示应用名称（仅win），有轻微性能损耗 */
+  showProcessName?: boolean;
 };
 
 const getHostPort = (rawHost: string): [string, number] => {
@@ -71,8 +77,11 @@ export class HttpProxy {
   public readonly proxyServer: net.Server = http.createServer(
     async (req: http.IncomingMessage, res: http.ServerResponse) => {
       const encrypted = req.socket["encrypt" + "ed"];
-      if (!encrypted && req.url === `/pg_pac_script_config`) {
-        console.log("读取PAC脚本", await getProcessByPort(req.socket.remotePort, req.socket.localPort));
+      if (!encrypted && req.url === `/pg_pac_script_config/${this.token}`) {
+        console.log(
+          "读取PAC脚本",
+          this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : ""
+        );
         res.end(`function FindProxyForURL(url, host) {
         if (${this.hosts.map(host => `dnsDomainIs(host, "${host}")`).join("||")}) {
           return "PROXY ${this.opt.proxyBindIp}:${this.opt.proxyBindPort}; DIRECT";
@@ -217,8 +226,9 @@ export class HttpProxy {
         "\t",
         String(req.method || "").padEnd(7, " "),
         "\t",
-        await getProcessByPort(req.socket.remotePort, req.socket.localPort),
-        "\t",
+        ...(this.opt.showProcessName
+          ? [await getProcessNameByPort(req.socket.remotePort, req.socket.localPort), "\t"]
+          : []),
         String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : "")
       );
     }
@@ -234,6 +244,8 @@ export class HttpProxy {
     opt.proxyBindPort = opt?.proxyBindPort || 1080;
     opt.listenRequestPorts = opt?.listenRequestPorts || [80, 443];
     opt.runWith = opt?.runWith || "httpProxy";
+    opt.autoSettings = opt?.autoSettings ?? true;
+    opt.showProcessName = opt?.showProcessName ?? true;
     this.opt = opt;
     this.proxyServer.once("error", console.error);
     Promise.all(hosts.map(host => dns.promises.resolve(host))).then(ips => {
@@ -275,13 +287,24 @@ export class HttpProxy {
         });
         /** 如果是普通http proxy，则需要监听端口暴露这个代理服务器 */
         this.proxyServer.listen(opt.proxyBindPort, opt.proxyBindIp);
-
-        console.log(
-          `\x1B[32m*** 若需使用普通代理模式，请进入系统设置代理服务器${opt.proxyBindIp}:${opt.proxyBindPort}\x1B[0m`
-        );
-        console.log(
-          `\x1B[32m*** 若需使用PAC模式，请设置代理服务器“使用设置脚本”→“脚本地址”输入：http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config\x1B[0m`
-        );
+        if (this.opt.autoSettings) {
+          setProxyWin({
+            proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
+            status: "全部开启",
+            pac: `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`,
+          }).then(obj => {
+            console.log("已自动帮您修改系统设置：");
+            console.log("代理服务器", obj.proxyIp);
+            console.log("PAC脚本", obj.pac);
+          });
+        } else {
+          console.log(
+            `\x1B[32m*** 若需使用普通代理模式，请进入系统设置代理服务器${opt.proxyBindIp}:${opt.proxyBindPort}\x1B[0m`
+          );
+          console.log(
+            `\x1B[32m*** 若需使用PAC模式，请设置代理服务器“使用设置脚本”→“脚本地址”输入：http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}\x1B[0m`
+          );
+        }
       } else {
         /** tls解析器，把https的请求转换成普通http */
         const tlsServer = tls.createServer(
@@ -317,7 +340,7 @@ export class HttpProxy {
         (opt.listenRequestPorts || []).map(port => net.createServer(connectionListener).listen(port));
         if (opt.runWith === "dns") {
           /** 直接创建一个代理DNS服务器 */
-          this.dnsServer = new DnsServer(53, opt.proxyBindIp);
+          this.dnsServer = new DnsServer(53, opt.proxyBindIp, this.opt.autoSettings);
           this.hosts.forEach(host => {
             /** 添加本地DNS服务器的解析规则 */
             this.dnsServer?.add(opt.proxyBindIp || "", host);
@@ -334,36 +357,6 @@ export class HttpProxy {
     return this;
   }
 }
-/** 通过通信端口，获取应用名称 */
-const getProcessByPort = (remotePort: number = 0, localPort: number = 0) =>
-  new Promise(resolve =>
-    child_process.exec(`netstat -aonp TCP |findstr ":${remotePort}"`, (err, data) => {
-      if (err) {
-        resolve("");
-        return;
-      }
-      const pid = (String(data).match(
-        new RegExp(
-          `TCP\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${remotePort}\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${localPort}\\s+\\S+\\s+(\\d+)`
-        )
-      ) || [])[1];
-      if (!pid) {
-        resolve("");
-        return;
-      }
-      child_process.exec(`tasklist /FI "PID eq ${pid}" /NH`, (err, data) =>
-        resolve(
-          (
-            (!err &&
-              (String(data)
-                .trim()
-                .match(new RegExp(`^(.+?)\\s+${pid}`)) || [])[1]) ||
-            ""
-          ).trim()
-        )
-      );
-    })
-  );
 
 // new HttpProxy(["www.baidu.com"], {
 //   //runWith: "dns",
