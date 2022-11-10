@@ -59,9 +59,9 @@ export class Buf {
   public readUIntBE(byteLength: number, offset?: number): number {
     this.offset = offset ?? this.offset;
     if (byteLength <= 6) {
-      this.lastReadValue = this.buffer.readUIntLE(this.offset, byteLength);
+      this.lastReadValue = this.buffer.readUIntBE(this.offset, byteLength);
     } else {
-      this.lastReadValue = this.buffer.readUIntLE(this.offset + byteLength - 6, 6);
+      this.lastReadValue = this.buffer.readUIntBE(this.offset + byteLength - 6, 6);
       for (let index = 6; index < byteLength; index++) {
         this.lastReadValue *= 256;
         this.lastReadValue += this.buffer[this.offset + index];
