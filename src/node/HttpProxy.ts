@@ -5,7 +5,7 @@ import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
 import { DnsServer } from "./DnsServer";
-import { recvAll } from "./RecvBuf";
+import { recvAll } from "./utils";
 import { getProcessNameByPort, setProxyWin } from "./systemNetworkSettings";
 
 /** 使用PG的公共证书签发平台 */
