@@ -2,75 +2,138 @@ import * as fs from "fs";
 import * as path from "path";
 import * as zlib from "zlib";
 import { Buf } from "./Buf";
-import { IReadStream } from "./IReadStream";
-import { recvAll } from "./RecvBuf";
-import { IGetLengthFn, RecvStream } from "./RecvStream";
+import { IReadStream } from "./utils";
+import { RecvStream } from "./RecvStream";
+
+export type IUnZipHead = {
+  version: number;
+  flag: number;
+  compressionMethod: number;
+  lastModificationTime: number;
+  lastModificationDate: number;
+  CRC: Buffer;
+  compressedSize: number;
+  uncompressedSize: number;
+  fileNameLength: number;
+  extraFieldLength: number;
+  fileName?: string;
+  extraField?: Buffer;
+  filePath: string;
+  fileRecvStream?: IReadStream;
+};
 export class UnZip {
   private dirCache: Set<string> = new Set();
   private outputPath: string;
-  private getLengthFn: IGetLengthFn = (headerBuf, readBufferFn) => {
-    const buf = new Buf(headerBuf);
-    const info = {
-      head: buf.readUIntLE(4),
-      version: buf.readUIntLE(2),
-      flag: buf.readUIntLE(2),
-      compressionMethod: buf.readUIntLE(2),
-      lastModificationTime: buf.readUIntLE(2),
-      lastModificationDate: buf.readUIntLE(2),
-      CRC: buf.read(4),
-      compressedSize: buf.readUIntLE(4),
-      uncompressedSize: buf.readUIntLE(4),
-      fileNameLength: buf.readUIntLE(2),
-      extraFieldLength: buf.readUIntLE(2),
-      fileName: "",
-    };
-    if (info.head !== 0x04034b50) {
+  private recvStream: RecvStream;
+  private onFile?: (fileHead: IUnZipHead) => void;
+  private zipFileHead = [0x50, 0x4b, 3, 4];
+  private getHead(index = 0, err_time = 0) {
+    if (index >= this.zipFileHead.length) {
+      this.readFileInfo();
       return;
     }
-    const ReadStream = readBufferFn(info.compressedSize + info.fileNameLength + info.extraFieldLength);
-    let needReadFileNameSize = info.fileNameLength + info.extraFieldLength;
-    const fileNameBufs: Buffer[] = [];
-    const needReadFileName = () => {
-      ReadStream.once("readable", () => {
-        let data: Buffer;
-        while (needReadFileNameSize && (data = ReadStream.read(needReadFileNameSize))) {
-          if (data && data.length) {
-            needReadFileNameSize -= data.length;
-            fileNameBufs.push(data);
-          }
-        }
-        if (needReadFileNameSize) {
-          needReadFileName();
-        } else {
-          info.fileName = path.join(this.outputPath, String(Buffer.concat(fileNameBufs).slice(0, info.fileNameLength)));
-          const { dir } = path.parse(info.fileName);
-          if (!this.dirCache.has(dir)) {
-            fs.mkdir(dir, { recursive: true }, () => {
-              this.dirCache.add(dir);
-              writeFile();
-            });
-          } else {
-            writeFile();
-            //process.nextTick(writeFile);
-          }
-        }
-      });
-    };
-    needReadFileName();
-    const writeFile = () => {
-      if (!info.compressedSize) {
-        recvAll(ReadStream);
+    this.recvStream.readBuffer(1, ([sign]) => {
+      if (sign === this.zipFileHead[index]) {
+        this.getHead(index + 1);
         return;
       }
-      if (info.compressionMethod === 8 || info.compressionMethod === 9) {
-        ReadStream.pipe(zlib.createInflateRaw()).pipe(fs.createWriteStream(info.fileName));
-      } else {
-        ReadStream.pipe(fs.createWriteStream(info.fileName));
+      if (err_time > 50) {
+        process.nextTick(() => this.getHead(0, 0));
+        return;
       }
-    };
-  };
-  constructor(readStream: IReadStream, outputPath: string = __dirname + "/unzip/") {
+      this.getHead(0, err_time + 1);
+    });
+  }
+  private readFileInfo() {
+    this.recvStream.readBuffer(26, headerBuf => {
+      const buf = new Buf(headerBuf);
+      const info: IUnZipHead = {
+        version: buf.readUIntLE(2),
+        flag: buf.readUIntLE(2),
+        compressionMethod: buf.readUIntLE(2),
+        lastModificationTime: buf.readUIntLE(2),
+        lastModificationDate: buf.readUIntLE(2),
+        CRC: buf.read(4),
+        compressedSize: buf.readUIntLE(4),
+        uncompressedSize: buf.readUIntLE(4),
+        fileNameLength: buf.readUIntLE(2),
+        extraFieldLength: buf.readUIntLE(2),
+        filePath: "",
+      };
+
+      /** 读取File name */
+      this.recvStream.readBuffer(info.fileNameLength, fileBuf => {
+        info.fileName = String(fileBuf);
+
+        /** 读取Extra field */
+        this.recvStream.readBuffer(info.extraFieldLength, extraBuf => {
+          info.extraField = extraBuf;
+
+          /** 读取文件内容 */
+          info.filePath = path.join(this.outputPath, info.fileName || "");
+          this.mkdir(path.dirname(info.filePath), () => {
+            if (info.compressedSize) {
+              this.recvStream.readStream(info.compressedSize, fileStream => {
+                if (info.compressionMethod === 8 || info.compressionMethod === 9) {
+                  info.fileRecvStream = fileStream.pipe(zlib.createInflateRaw());
+                } else {
+                  info.fileRecvStream = fileStream;
+                }
+                if (this.onFile) {
+                  this.onFile(info);
+                } else {
+                  info.fileRecvStream?.pipe(fs.createWriteStream(info.filePath));
+                }
+                this.getHead();
+              });
+              return;
+            }
+            this.onFile && this.onFile(info);
+            this.getHead();
+          });
+        });
+      });
+    });
+  }
+  private mkdir(path: string, callback: () => void) {
+    if (this.dirCache.has(path)) {
+      callback();
+      return;
+    }
+    fs.mkdir(path, { recursive: true }, err => {
+      this.dirCache.add(path);
+      callback();
+    });
+  }
+  constructor(
+    readStream: IReadStream,
+    onFile?: (fileHead: IUnZipHead) => void,
+    outputPath: string = __dirname + "/unzip/"
+  ) {
     this.outputPath = outputPath;
-    new RecvStream(readStream, 30, this.getLengthFn);
+    this.onFile = onFile;
+    this.recvStream = new RecvStream(readStream);
+    this.getHead();
   }
 }
+
+// require("https").get(
+//   "https://updatecdn.meeting.qq.com/cos/302a95c9dfa9d25256c464e0af7655a7/TencentMeeting_0300000000_3.12.6.436.publish.apk",
+//   res => {
+//     new UnZip(res, info => {
+//       info.fileRecvStream?.pipe(fs.createWriteStream(info.filePath));
+//       delete info.fileRecvStream;
+//       console.log(info);
+//     });
+//   }
+// );
+// console.time("time");
+// new UnZip(fs.createReadStream("1.zip"), info => {
+//   info.fileRecvStream?.pipe(fs.createWriteStream(info.filePath));
+//   // delete info.fileRecvStream;
+//   //console.log(info);
+// });
+// process.on("exit", () => {
+//   console.timeEnd("time");
+//   console.log("exit");
+// });
