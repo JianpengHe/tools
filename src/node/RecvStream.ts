@@ -1,131 +1,177 @@
 import * as stream from "stream";
 import { IReadStream } from "./utils";
 
-export type IRecvStreamReadBuffer = (readSize: number, callback: (buffer: Buffer) => void) => void;
+export type IRecvStreamReadBuffer = (
+  readSize: number | ((byte: number) => boolean),
+  callback: (buffer: Buffer) => void
+) => void;
 export type IRecvStreamReadStream = (
   readSize: number,
   callback: (stream: SubReadStream) => void,
   onClose?: () => void
 ) => void;
-
-type IRecvStreamQueue =
-  | { type: "buffer"; readSize: number; callback: Parameters<IRecvStreamReadBuffer>[1] }
-  | { type: "stream"; readSize: number; callback: Parameters<IRecvStreamReadStream>[1]; onClose?: () => void };
+type IRecvStreamQueueBuffer = {
+  type: "buffer";
+  readSize: number | ((byte: number) => boolean);
+  callback: Parameters<IRecvStreamReadBuffer>[1];
+};
+type IRecvStreamQueueStream = {
+  type: "stream";
+  readSize: number;
+  callback: Parameters<IRecvStreamReadStream>[1];
+  onClose?: () => void;
+};
+type IRecvStreamQueue = IRecvStreamQueueBuffer | IRecvStreamQueueStream;
 export class RecvStream {
   /** 源可读流 */
-  public stream: IReadStream;
+  public sourceStream: IReadStream;
 
-  /** 只读取一定字节的子可读流引用，会立刻交付给callback回调函数 */
-  private subReadStream?: SubReadStream;
+  /** 临时储存 */
+  private tempBuffer: Buffer[] = [];
 
-  /** 只读取一定字节的buffer引用，会接收完后，才交付给callback回调函数 */
-  private subBuffer: Buffer[] = [];
+  /** 临时储存的字节数 */
+  private tempBufferSize: number = 0;
 
   /** 剩余未接受的字节数 */
-  private subBufferRemainSize: number = 0;
+  private bufferRemainSize: number = 0;
+
+  /** 不定长buffer的长度 */
+  private bufferLen: number = 0;
 
   /** read函数队列 */
   private taskQueue: IRecvStreamQueue[] = [];
 
-  /** 当前是否正在处理 */
-  private taskLock: boolean = false;
-
-  /** callback函数是否正在执行 */
-  private isCallbaclRun: boolean = false;
-
-  constructor(stream: IReadStream) {
-    this.stream = stream;
-    stream.on("readable", this.readable.bind(this));
-    // stream.on("end", () => {
-    //   console.log("p");
-    // });
-  }
-  private readable() {
-    // console.log(this.stream.readable, this.taskQueue);
-    const nowFn = this.taskQueue[0];
-    if (!this.stream.readable || !nowFn) {
-      return;
-    }
-
-    if (nowFn.type === "stream") {
-      if (!this.taskLock || !this.subReadStream) {
-        if (this.taskLock && !this.subReadStream) {
-          return;
-        }
-        this.taskLock = true;
-        this.subReadStream = new SubReadStream(this.stream, nowFn.readSize, () => {
-          this.subReadStream = undefined;
-          if (nowFn.onClose) {
-            this.isCallbaclRun = true;
-            nowFn.onClose();
-            this.isCallbaclRun = false;
-          }
-          this.taskDone();
-        });
-        this.isCallbaclRun = true;
-        nowFn.callback(this.subReadStream);
-        this.isCallbaclRun = false;
-      }
-      this.subReadStream.tryRead();
-      return;
-    }
-
-    if (!this.taskLock) {
-      this.taskLock = true;
-      this.subBuffer.length = 0;
-      this.subBufferRemainSize = nowFn.readSize;
-    }
-    this.tryRead();
-  }
-  private tryRead() {
-    // console.log(this.subBufferRemainSize, this.stream.readableLength, this.stream.readable);
-    if (this.subBufferRemainSize && this.stream.readableLength) {
-      const buf = this.stream.read(Math.min(this.subBufferRemainSize, this.stream.readableLength));
-      if (!buf) {
-        return;
-      }
-      // console.log(buf.length);
-      this.subBuffer.push(buf);
-      this.subBufferRemainSize -= buf.length;
-      if (!this.subBufferRemainSize) {
-        const nowFn = this.taskQueue[0];
-        if (nowFn.type !== "stream") {
-          this.isCallbaclRun = true;
-          nowFn.callback(Buffer.concat(this.subBuffer));
-          this.isCallbaclRun = false;
-          this.subBuffer.length = 0;
-          this.taskDone();
-          return;
-        }
-        throw new Error("不可能到这里的");
-      } else {
-        this.tryRead();
-      }
-    }
-  }
-
-  /** 上一个任务完成后 */
-  private taskDone() {
-    this.stream.resume();
-    this.taskLock = false;
-    this.taskQueue.splice(0, 1);
-    this.readable();
-  }
-
-  /** 读取所有给定的字节，读完后放在buffer里。若在callback里调用该函数，新建的任务将置于队头，保证它是下一个执行的（可多次调用，相当于栈，后进先出），若在其他地方调用则置于队尾（先进先出） */
-  public readBuffer: IRecvStreamReadBuffer = (readSize, callback) => {
-    this.newTask({ type: "buffer", readSize, callback });
-    return this;
-  };
-
-  /** 建立“只读取给定的字节的”子可读流，并【立刻】返回该子读流的引用。若在callback/onClose里调用该函数，新建的任务将置于队头，保证它是下一个执行的（可多次调用，相当于栈，后进先出），若在其他地方调用则置于队尾（先进先出） */
-  public readStream: IRecvStreamReadStream = (readSize, callback, onClose) => {
-    this.newTask({ type: "stream", readSize, callback, onClose });
-    return this;
-  };
+  /** 当前正在处理的任务 */
+  private task?: IRecvStreamQueue;
 
   /** 新建task */
-  private newTask(recvStreamQueue: IRecvStreamQueue) {
+  private newTask() {
+    if (
+      this.task || // 正在执行
+      this.taskQueue.length === 0 || // 队列里没任务了
+      !(this.task = this.taskQueue.splice(0, 1)[0]) // 取不到第一个任务
+    ) {
+      // console.log("等待任务");
+      return;
+    }
+    if (this.task.type === "buffer") {
+      this.bufferLen = 0;
+      /** 不定长buffer至少需要读1个字节 */
+      this.bufferRemainSize = Number(this.task.readSize) || 1;
+      this.read();
+    } else {
+      /** 这边的流要先暂停，子流才能读取 */
+      this.sourceStream.pause();
+
+      /** 需要把已经读出来的内存退回去 */
+      this.sourceStream.unshift(Buffer.concat(this.tempBuffer));
+
+      /** 清空 */
+      this.tempBuffer.length = 0;
+      this.tempBufferSize = 0;
+
+      this.task.callback(
+        new SubReadStream(this.sourceStream, this.task.readSize, () => {
+          const task = this.task as IRecvStreamQueueStream;
+          if (task.onClose) {
+            task.onClose();
+          }
+          this.task = undefined;
+          this.newTask();
+        })
+      );
+    }
+  }
+  private read() {
+    /** 当前读取到的字节数没有满足开发者的需求 */
+    if (this.bufferRemainSize > this.tempBufferSize) {
+      if (!this.sourceStream.readableFlowing) {
+        /** 别停下来 */
+        this.sourceStream.resume();
+      }
+      this.sourceStream.once("data", chuck => {
+        this.tempBufferSize += chuck.length;
+        this.tempBuffer.push(chuck);
+        this.read();
+      });
+      return;
+    }
+
+    /** buffer数组合并成一个大块，并且放在数组第0位 */
+    if (this.tempBuffer.length > 0) {
+      this.tempBuffer[0] = Buffer.concat([...this.tempBuffer]);
+      //  this.tempBuffer.length = 1;
+    }
+    const buffer = this.tempBuffer[0];
+    if (this.task) {
+      const task = this.task as IRecvStreamQueueBuffer;
+      if (task.readSize instanceof Function) {
+        /** 只遍历最后一次获取到的内存块 */
+        for (const byte of this.tempBuffer[this.tempBuffer.length - 1]) {
+          this.bufferLen++;
+          this.bufferRemainSize++;
+          if (task.readSize(byte)) {
+            task.readSize = this.bufferLen;
+            break;
+          }
+        }
+        /** 清空数组，只保留合并后的第0位 */
+        this.tempBuffer.length = 1;
+
+        /** 如果还是函数，说明当前拿到的数据还没满足开发者的要求，继续read */
+        if (task.readSize instanceof Function) {
+          this.read();
+          return;
+        }
+      } else {
+        /** 清空数组，只保留合并后的第0位 */
+        this.tempBuffer.length = 1;
+      }
+      task.callback(buffer.subarray(0, task.readSize));
+      this.tempBufferSize -= task.readSize;
+      /** 截取并去掉已交付开发者的数据块 */
+      this.tempBuffer[0] = buffer.subarray(task.readSize);
+      /** 清空当前任务 */
+      this.task = undefined;
+    }
+    if (this.taskQueue.length) {
+      this.newTask();
+    } else {
+      /** 队列里没读取任务了，先停一下 */
+      this.sourceStream.pause();
+    }
+  }
+  constructor(sourceStream: IReadStream) {
+    this.sourceStream = sourceStream;
+    sourceStream.pause();
+    sourceStream["t"] = this;
+  }
+
+  /** 读取所有给定的字节，读完后放在buffer里。新建的任务将置于队列的【队尾】（先进先出） */
+  public readBufferAfter: IRecvStreamReadBuffer = (readSize, callback) => {
+    this.addNewTask({ type: "buffer", readSize, callback });
+    return this;
+  };
+
+  /** 读取所有给定的字节，读完后放在buffer里。新建的任务将置于【队头】，保证它是下一个执行的（可多次调用，相当于栈，后进先出）*/
+  public readBuffer: IRecvStreamReadBuffer = (readSize, callback) => {
+    this.addNewTask({ type: "buffer", readSize, callback }, true);
+    return this;
+  };
+
+  /** 建立“只读取给定的字节的”子可读流，并【立刻】返回该子读流的引用。新建的任务将置于【队尾】（先进先出） */
+  public readStreamAfter: IRecvStreamReadStream = (readSize, callback, onClose) => {
+    this.addNewTask({ type: "stream", readSize, callback, onClose });
+    return this;
+  };
+
+  /** 建立“只读取给定的字节的”子可读流，并【立刻】返回该子读流的引用。新建的任务将置于【队头】，保证它是下一个执行的（可多次调用，相当于栈，后进先出）*/
+  public readStream: IRecvStreamReadStream = (readSize, callback, onClose) => {
+    this.addNewTask({ type: "stream", readSize, callback, onClose }, true);
+    return this;
+  };
+
+  private addNewTask(recvStreamQueue: IRecvStreamQueue, unshift = false) {
     if (!recvStreamQueue.readSize) {
       if (recvStreamQueue.type === "buffer") {
         recvStreamQueue.callback(Buffer.alloc(0));
@@ -133,52 +179,61 @@ export class RecvStream {
       }
       throw new Error("readSize 不能为0");
     }
-    if (this.isCallbaclRun) {
-      this.taskQueue.splice(1, 0, recvStreamQueue);
+
+    if (unshift) {
+      this.taskQueue.unshift(recvStreamQueue);
     } else {
       this.taskQueue.push(recvStreamQueue);
     }
-    this.stream.resume();
-    this.readable();
+    this.newTask();
   }
 }
 
 export class SubReadStream extends stream.Readable {
-  public stream: IReadStream;
-  public canRecvSize: number;
+  public sourceStream: IReadStream;
   public needReadSize: number;
-  public done: () => void;
-  constructor(stream: IReadStream, needReadSize: number, done: () => void) {
+  private tempBuffer?: Buffer;
+  public done: (subReadStream: SubReadStream) => void;
+  constructor(sourceStream: IReadStream, needReadSize: number, done?: (subReadStream: SubReadStream) => void) {
     super();
-    this.canRecvSize = 0;
-    this.stream = stream;
+    this.sourceStream = sourceStream;
     this.needReadSize = needReadSize;
-    this.done = done;
+    this.done = done || (() => {});
+    this.sourceStream.pause();
   }
   public _construct(callback: (err: TypeError | undefined) => void) {
-    callback(this.stream.destroyed ? new TypeError("stream destroyed") : undefined);
+    callback(this.sourceStream.destroyed ? new TypeError("stream destroyed") : undefined);
   }
-  public tryRead() {
-    if (!this.needReadSize) {
-      this.push(null);
-      this.done();
-      return;
+  public consume() {
+    while (this.tempBuffer && this.tempBuffer.length) {
+      const nowRecvSize = Math.min(this.tempBuffer.length, this.needReadSize);
+      this.push(this.tempBuffer.subarray(0, nowRecvSize));
+      this.tempBuffer = nowRecvSize < this.tempBuffer.length ? this.tempBuffer.subarray(nowRecvSize) : undefined;
+      this.needReadSize -= nowRecvSize;
+      if (this.needReadSize <= 0) {
+        this.sourceStream.unshift(this.tempBuffer);
+        this.push(null);
+        this.done(this);
+        return true;
+      }
     }
-    const nowNeedRead = Math.min(this.canRecvSize, this.stream.readableLength, this.needReadSize);
-    if (nowNeedRead === 0) {
-      return;
-    }
-    const buf = this.stream.read(nowNeedRead);
-    if (buf) {
-      this.push(buf);
-      this.needReadSize -= buf.length;
-      this.canRecvSize -= buf.length;
-      this.tryRead();
-    }
+
+    return false;
   }
   public _read(canRecvSize: number) {
-    this.canRecvSize = canRecvSize || 0;
-    this.tryRead();
+    if (this.consume()) {
+      return;
+    }
+    if (!this.tempBuffer || !this.tempBuffer.length) {
+      this.sourceStream.resume();
+      this.sourceStream.once("data", chuck => {
+        this.tempBuffer = chuck;
+        this.sourceStream.pause();
+        this.consume();
+      });
+    } else {
+      throw new Error("不科学");
+    }
   }
   public _destroy(err, callback) {
     callback(err);
@@ -186,39 +241,36 @@ export class SubReadStream extends stream.Readable {
 }
 
 // 测试用例
-// https://updatecdn.meeting.qq.com/cos/6e6d1d9c19084cc66193dbe807c9ab0c/TencentMeeting_0300000000_3.12.7.434.publish.exe
-// require("https").get(
-//   "https://updatecdn.meeting.qq.com/cos/6e6d1d9c19084cc66193dbe807c9ab0c/TencentMeeting_0300000000_3.12.7.434.publish.exe",
-//   res => {
-//     const recvStream = new RecvStream(res);
-//     recvStream.readBuffer(1e10, buffer => {
-//       console.log(buffer);
-//       recvStream.readStream(
-//         2,
-//         stream => {
-//           console.log(2);
-//           stream.pipe(require("fs").createWriteStream("1.bin"));
-//           recvStream.readBuffer(7, buffer => {
-//             console.log(7, buffer);
-//           });
-//         },
-//         () => {
-//           console.log("sub stream close");
-//           recvStream.readStream(6, stream => {
-//             console.log(6);
-//             stream.pipe(require("fs").createWriteStream("2.bin"));
-//           });
-//         }
-//       );
+// new SubReadStream(require("fs").createReadStream("d:/t.bin", { highWaterMark: 10 }), 64 * 1024 + 3, subReadStream => {
+//   new SubReadStream(subReadStream.sourceStream, 64).pipe(require("fs").createWriteStream("3.bin"));
+// }).pipe(require("fs").createWriteStream("2.bin"));
+
+// 测试用例
+// const recvStream = new RecvStream(require("fs").createReadStream("d:/t.bin", { highWaterMark: 10 }));
+// recvStream.readBuffer(
+//   byte => byte === 0x24,
+//   buffer => {
+//     console.log("不定长", buffer.length, [...buffer]);
+//     recvStream.readBuffer(6, buffer => {
+//       console.log(6, [...buffer]);
 //     });
-//     recvStream.readBuffer(3, buffer => {
-//       console.log(2, buffer);
-//       recvStream.readBuffer(5, buffer => {
-//         console.log(5, buffer);
-//       });
-//     });
-//     recvStream.readBuffer(4, buffer => {
-//       console.log(3, buffer);
+//     recvStream.readStream(100, stream1 => {
+//       console.log(100, recvStream.sourceStream.readableFlowing);
+//       stream1.pipe(require("fs").createWriteStream("1.bin"));
 //     });
 //   }
 // );
+// recvStream.readStream(10, stream1 => {
+//   console.log(10);
+//   // stream1.pipe(require("fs").createWriteStream("2.bin"));
+//   stream1.on("data", d => {
+//     console.log("data", d);
+//   });
+// });
+// recvStream.readBufferAfter(6, buffer => {
+//   console.log(6, [...buffer]);
+// });
+// recvStream.readBufferAfter(5, buffer => {
+//   console.log(5, [...buffer]);
+// });
+// setTimeout(() => {}, 1000000);
