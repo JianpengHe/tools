@@ -1,22 +1,12 @@
 import { Buf } from "./Buf";
-import { IGetLengthFn, RecvStream } from "./RecvStream";
 import * as net from "net";
 import * as crypto from "crypto";
-import { recvAll } from "./RecvBuf";
-const showTCPpacket = 0;
-const Log = (...msg) => {
-  //  console.log(...msg);
-};
+import { ReliableSocket } from "./ReliableSocket";
+import { RecvStream } from "./RecvStream";
+import { TypedEventEmitter } from "./utils";
+
 export const SHA1 = (str: Buffer) => crypto.createHash("sha1").update(str).digest();
 
-export type IConnect = {
-  host: string;
-  port: number;
-  user: string;
-  password: string;
-  database: string;
-  character?: "utf8" | "utf8mb4";
-};
 export class MysqlBuf extends Buf {
   constructor(buf?: Buffer, offset?: number) {
     super(buf, offset);
@@ -63,7 +53,7 @@ export class MysqlBuf extends Buf {
     );
   }
 }
-export enum IFieldType {
+export enum EMysqlFieldType {
   decimal = 0x00,
   tiny = 0x01,
   short = 0x02,
@@ -92,7 +82,7 @@ export enum IFieldType {
   string = 0xfe,
   geometry = 0xff,
 }
-export enum IFieldFlags {
+export enum EMysqlFieldFlags {
   not_flags = 0,
   not_null = 0x0001,
   pri_key = 0x0002,
@@ -107,7 +97,36 @@ export enum IFieldFlags {
   timestamp = 0x0400,
   set = 0x0800,
 }
-export type IFieldHeader = {
+export type IMysqlConnect = {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+  character?: "utf8" | "utf8mb4";
+};
+export type IMysqlHandshake = {
+  protocol_version: number;
+  server_version: string;
+  connection_id: number;
+  auth_plugin_data_part_1: Buffer;
+  capability_flag_1: number;
+  character_set: number;
+  status_flags: number;
+  capability_flags_2: number;
+  auth_plugin_data_len: number;
+  auth_plugin_data_part_2: Buffer;
+  auth_plugin_name: string;
+};
+export type IMysqlHandshakeRes = {
+  capability_flags: number;
+  max_packet_size: number;
+  character_set: "utf8" | "utf8mb4";
+  username: string;
+  password: string;
+  database: string;
+};
+export type IMysqlFieldHeader = {
   catalog: string;
   schema: string;
   table: string;
@@ -116,204 +135,78 @@ export type IFieldHeader = {
   nameOrg: string;
   characterSet: number;
   columnLength: number;
-  type: IFieldType;
-  flags: IFieldFlags;
+  type: EMysqlFieldType;
+  flags: EMysqlFieldFlags;
   decimals: number;
 };
-export type IValue = number | string | Date | Buffer | null;
-export type IResult = {
+export type IMysqlValue = number | string | Date | Buffer | null;
+export type IMysqlResult = {
   affectedRows: number;
   lastInsertId: number;
   statusFlags: number;
   warningsNumber: number;
   message: string;
 };
-export type IResultset = { headerInfo: IFieldHeader[]; data: IValue[][] };
-export type IPrepareResult = {
-  status: number;
+export type IMysqlResultset = { headerInfo: IMysqlFieldHeader[]; data: IMysqlValue[][] };
+export type IMysqlPrepareResult = {
   statementId: number;
   columnsNum: number;
   paramsNum: number;
   warningCount: number;
-  hasResultSet: boolean;
 };
-export class Mysql {
-  public socket: net.Socket;
-  public connectInfo: IConnect;
-  private handshakeDone: boolean;
-  private callbackQueue: (() => void)[];
-  private recvDataQueue: Buffer[];
-  private character: "utf8" | "utf8mb4";
-  public handshake: Promise<void>;
-  constructor(connect: IConnect) {
-    this.connectInfo = connect;
-    this.socket = net.connect(
-      { host: connect.host, port: connect.port },
-      () => new RecvStream(this.socket, 5, this.recv)
-    );
-    this.handshakeDone = false;
-    this.lastRecvLen = 0;
-    this.callbackQueue = [];
-    this.recvDataQueue = [];
-    this.character = connect.character || "utf8mb4";
-    this.handshake = new Promise(resolve => {
-      this.callbackQueue.push(() => resolve());
-    });
-    // setInterval(() => Log(this.socket.readableLength, this.callbackQueue), 1000);
-  }
-  private lastRecvLen: number;
-  private recv: IGetLengthFn = async (buffer, readBufferFn) => {
-    const buf = new Buf(buffer);
-    const len = buf.readUIntLE(3);
-    const { lastRecvLen } = this;
-    this.lastRecvLen = len;
-    const index = buf.readUIntLE(1);
-    const type = buf.readUIntLE(1);
-    const dataBuffer = await recvAll(readBufferFn(len - 1));
-    // OK 响应报文	0x00
-    // Error 响应报文	0xFF
-    // Result Set 报文	0x01 - 0xFA
-    // Field 报文	0x01 - 0xFA
-    // Row Data 报文	0x01 - 0xFA
-    // EOF 报文	0xFE
-    if (showTCPpacket) {
-      console.log(
-        "\x1B[32m↓\tlen\x1B[0m",
-        len,
-        "\x1B[32mtype\x1B[0m",
-        type,
-        "index",
-        index,
-        dataBuffer,
-        this.socket.readableLength
-      );
-    }
-    if (type === 0xff) {
-      const errBuf = new Buf(dataBuffer);
-      const code = errBuf.readUIntLE(2);
-      const msg = errBuf.readString();
-      console.log(code, msg);
-      return;
-    }
-    if (!this.handshakeDone) {
-      if (type === 0) {
-        this.handshakeDone = true;
-        this.recvQuery();
-        this.recvDataQueue.length = 0;
-      } else {
-        this.handshakeFn(dataBuffer, index);
-      }
-      return;
-    }
-    if (type === 0xfe && dataBuffer.length < 8) {
-      this.recvDataQueue.push(Buffer.allocUnsafe(0));
-      this.recvQuery();
-      return;
-    }
-    if (lastRecvLen === 0xffffff) {
-      this.recvDataQueue[this.recvDataQueue.length - 1] = Buffer.concat([
-        this.recvDataQueue[this.recvDataQueue.length - 1],
-        Buffer.allocUnsafe(1).fill(type),
-        dataBuffer,
-      ]);
-    } else {
-      this.recvDataQueue.push(Buffer.concat([Buffer.allocUnsafe(1).fill(type), dataBuffer]));
-    }
-    if (type === 0 && index === 1 && this.recvDataQueue.length === 1) {
-      this.recvQuery();
-    }
-  };
-  private recvQuery() {
-    const callback = this.callbackQueue.splice(0, 1)[0];
-    if (callback) {
-      callback();
-    } else {
-      throw new TypeError("未设置回调！！！");
-    }
-    this.recvDataQueue.length = 0;
-  }
-  public prepare(prepareSql: string): Promise<IPrepareResult> {
-    if (!this.handshakeDone) {
-      throw new TypeError("未登录成功");
-    }
-    return new Promise(resolve => {
-      const readParamsType = () => Log("readParamsType", prepareSql, this.callbackQueue, this.recvDataQueue);
-      const readColumnsType = () => Log("readColumnsType", prepareSql, this.callbackQueue, this.recvDataQueue);
-      const prepare = () => {
-        Log("解决准备", this.recvDataQueue, this.callbackQueue);
-        const buf = new Buf(this.recvDataQueue[0]);
-        const prepareResult: IPrepareResult = {
-          status: buf.readUIntLE(1),
-          statementId: buf.readUIntLE(4),
-          columnsNum: buf.readUIntLE(2),
-          paramsNum: buf.readUIntLE(2),
-          warningCount: buf.readUIntLE(2, 1),
-          hasResultSet: false,
-        };
-        if (prepareResult.paramsNum > 0) {
-          this.callbackQueue.unshift(readParamsType);
-        }
-        if (prepareResult.columnsNum > 0) {
-          this.callbackQueue.unshift(readColumnsType);
-          prepareResult.hasResultSet = true;
-        }
-        Log("prepare", prepareSql, this.callbackQueue, this.recvDataQueue);
-        resolve(prepareResult);
-      };
-      this.callbackQueue.push(prepare);
-      this.send(new Buf().writeUIntLE(0x16).writeStringPrefix(prepareSql).buffer, 0);
-    });
-  }
-  public execute(prepareResult: IPrepareResult, params: IValue[]) {
-    const buf = new Buf();
-    buf.writeUIntLE(0x17);
-    buf.writeUIntLE(prepareResult.statementId, 4);
-    buf.writeUIntLE(0); // 0x00: CURSOR_TYPE_NO_CURSOR、0x01: CURSOR_TYPE_READ_ONLY、0x02: CURSOR_TYPE_FOR_UPDATE、0x04: CURSOR_TYPE_SCROLLABLE
-    buf.writeUIntLE(1, 4);
-    buf.writeUIntLE(
-      Number(
-        params.reduce(
-          (previousValue, currentValue, index) => Number(previousValue) + (currentValue === null ? 1 << index : 0),
-          0
-        )
-      )
-    );
-    buf.writeUIntLE(1);
-    const dataBuf = new MysqlBuf();
-    params.forEach(param => {
-      if (typeof param === "number") {
-        let len = 1;
-        while (len < 8 && 2 ** (len * 8) <= param) {
-          len *= 2;
-        }
-        if (len <= 8) {
-          buf.writeUIntLE(len === 4 ? 3 : len, 2);
-          dataBuf.writeUIntLE(param, len);
-          return;
-        }
-      } else if (typeof param === "object") {
-        if (param instanceof Buffer) {
-          buf.writeUIntLE(0xfb, 2);
-          dataBuf.writeIntLenenc(param.length);
-          dataBuf.write(param);
-          return;
-        } else if (param === null) {
-          buf.writeUIntLE(6, 2);
-          return;
-        } else if (param instanceof Date) {
-          param = this.dateToString(param);
-        } else {
-          param = JSON.stringify(param);
-        }
-      }
-      param = String(param);
-      buf.writeUIntLE(0xfd, 2);
-      dataBuf.writeStringLenenc(param);
-    });
+export type IMysqltask = {
+  sql: string;
+  params: IMysqlValue[];
+  callback: (err: Error | null, value?: IMysqlResult | IMysqlResultset) => void;
+};
+export type IMysqlEvents = {
+  handshake: (handshake: IMysqlHandshake, handshakeRes: IMysqlHandshakeRes) => void;
+  loginError: (errNo: number, errMsg: string) => void;
+  connected: () => void;
+  prepare: (sql: string, prepareResult: IMysqlPrepareResult) => void;
+};
 
-    return this.readResultset(Buffer.concat([buf.buffer, dataBuf.buffer]), prepareResult, 0);
+export class Mysql extends TypedEventEmitter<IMysqlEvents> {
+  public reliableSocket: ReliableSocket;
+  public readSocket?: RecvStream;
+  private socket?: net.Socket;
+  private connectInfo: IMysqlConnect;
+  private prepareMap: Map<string, IMysqlPrepareResult> = new Map();
+  private task?: IMysqltask;
+  private taskQueue: IMysqltask[] = [];
+  private connected = false;
+  constructor(connect: IMysqlConnect) {
+    super();
+    this.connectInfo = connect;
+    this.reliableSocket = new ReliableSocket(
+      { host: connect.host, port: connect.port },
+      {
+        onConnect: socket => {
+          this.socket = socket;
+          this.readSocket = new RecvStream(socket);
+          this.login();
+        },
+        onClose: () => {
+          this.connected = false;
+          this.prepareMap.clear();
+        },
+      }
+    );
   }
-  public dateToString(date: Date) {
+  private async recv() {
+    if (!this.readSocket) {
+      throw new Error("not readSocket");
+    }
+    const headBuf = this.readSocket.readBufferSync(4);
+    const head = headBuf instanceof Promise ? await headBuf : headBuf;
+    const len = head.readIntLE(0, 3);
+    if (!len) {
+      return [head];
+    }
+    const data = this.readSocket.readBufferSync(len);
+    return [head, data instanceof Promise ? await data : data];
+  }
+  private dateToString(date: Date) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(
       2,
       "0"
@@ -321,78 +214,143 @@ export class Mysql {
       date.getSeconds()
     ).padStart(2, "0")}`;
   }
-  private readResultset(sendBuf: Buffer, prepareResult: IPrepareResult, index: number): Promise<IResultset | IResult> {
-    return new Promise(resolve => {
-      const arr: Buffer[] = [];
-      this.callbackQueue.push(() => {
-        if (!prepareResult.hasResultSet) {
-          Log("无结果集");
-          const buf = new MysqlBuf(this.recvDataQueue[0]);
-          resolve({
-            affectedRows: buf.readIntLenenc(1),
-            lastInsertId: buf.readIntLenenc(),
-            statusFlags: buf.readUIntLE(2),
-            warningsNumber: buf.readUIntLE(2),
-            message: buf.readString(),
-          });
+  private async login() {
+    const handshakeRawBuf = await this.recv();
+    if (!handshakeRawBuf[1]) {
+      throw new Error("no login info");
+    }
+    const handshakeBuf = new Buf(handshakeRawBuf[1]);
+    const info = {
+      protocol_version: handshakeBuf.readUIntLE(1),
+      server_version: handshakeBuf.readString(),
+      connection_id: handshakeBuf.readUIntLE(4),
+      auth_plugin_data_part_1: handshakeBuf.read(8),
+      capability_flag_1: handshakeBuf.readUIntLE(2, handshakeBuf.offset + 1),
+      character_set: handshakeBuf.readUIntLE(1),
+      status_flags: handshakeBuf.readUIntLE(2),
+      capability_flags_2: handshakeBuf.readUIntLE(2),
+      auth_plugin_data_len: handshakeBuf.readUIntLE(1),
+      auth_plugin_data_part_2: handshakeBuf.read(handshakeBuf.lastReadValue - 9, handshakeBuf.offset + 10),
+      auth_plugin_name: handshakeBuf.readString(undefined, handshakeBuf.offset + 1),
+    };
+    const loginBuf = new Buf();
+    loginBuf.writeUIntLE(0, 3);
+    loginBuf.writeUIntLE(handshakeRawBuf[0][3] + 1);
+    const res: IMysqlHandshakeRes = {
+      capability_flags: 696973,
+      max_packet_size: 3221225472,
+      character_set: info.character_set === 45 ? "utf8mb4" : "utf8",
+      username: this.connectInfo.user,
+      password: this.connectInfo.password,
+      database: this.connectInfo.database,
+    };
+    this.emit("handshake", info, res);
+    loginBuf.writeUIntLE(res.capability_flags, 4);
+    loginBuf.writeUIntLE(res.max_packet_size, 4);
+    loginBuf.writeUIntLE(res.character_set === "utf8mb4" ? 45 : 33, 1);
+    loginBuf.alloc(23, 0);
+    loginBuf.writeStringNUL(res.username, loginBuf.offset + 23);
+    const password_sha1 = SHA1(Buffer.from(res.password));
+    const password = Buffer.alloc(password_sha1.length);
+    SHA1(Buffer.concat([info.auth_plugin_data_part_1, info.auth_plugin_data_part_2, SHA1(password_sha1)])).forEach(
+      (byte, i) => {
+        password[i] = byte ^ password_sha1[i];
+      }
+    );
+    loginBuf.writeUIntLE(password.length, 1);
+    loginBuf.write(password);
+    loginBuf.writeStringNUL(res.database);
+    loginBuf.writeStringNUL(info.auth_plugin_name);
+    loginBuf.buffer.writeUIntLE(loginBuf.buffer.length - 4, 0, 3);
+    if (this.socket?.readyState === "open") {
+      this.socket.write(loginBuf.buffer);
+      const [_, result] = await this.recv();
+      if (!result || result[0] !== 0) {
+        const errNo = result.readUInt16LE(1);
+        const errMsg = String(result.subarray(3));
+        if (!this.emit("loginError", errNo, errMsg)) {
+          throw new Error(`MYSQL Login Error: ${errNo} ${errMsg}`);
+        }
+        return;
+      }
+      this.connected = true;
+      this.emit("connected");
+      this.tryToConsume();
+      //console.log(t, String(t[1]));
+      return;
+    }
+    this.socket?.end();
+  }
+  private getPrepare(sql: string): Promise<IMysqlPrepareResult> {
+    const buf = new Buf();
+    buf.writeUIntLE(0x16);
+    buf.writeStringPrefix(sql);
+    return new Promise((resolve, reject) =>
+      this.reliableSocket.getSocket(async sock => {
+        let len = buf.buffer.length;
+        let i = 0;
+        let writeLen = 0;
+        while (len > 0) {
+          const nowWriteLen = Math.min(0xffffff, len);
+          len -= nowWriteLen;
+          const headBuf = Buffer.alloc(4, i);
+          headBuf.writeUIntLE(nowWriteLen, 0, 3);
+          sock.write(Buffer.concat([headBuf, buf.buffer.subarray(writeLen, (writeLen += nowWriteLen))]));
+          i++;
+        }
+        if (!this.readSocket) {
+          throw new Error("not readSocket");
+        }
+        let prepareResult: IMysqlPrepareResult | undefined = undefined;
+        let revcTimes = 0;
+        while (1) {
+          const headBuf = this.readSocket.readBufferSync(4);
+          const head = headBuf instanceof Promise ? await headBuf : headBuf;
+          len = head.readIntLE(0, 3);
+          if (!len) {
+            reject(new Error("pid: no len?"));
+            return;
+          }
+          const data = this.readSocket.readBufferSync(len);
+          const buffer = data instanceof Promise ? await data : data;
+          if (!buffer) {
+            reject(new Error("no buffer"));
+            return;
+          }
+          // console.log(buffer);
+          if (buffer[0] === 0xff) {
+            reject(new Error(String(buffer.subarray(3))));
+            return;
+          } else if (buffer[0] === 0) {
+            const buf = new Buf(buffer, 1);
+            prepareResult = {
+              statementId: buf.readUIntLE(4),
+              columnsNum: buf.readUIntLE(2),
+              paramsNum: buf.readUIntLE(2),
+              warningCount: buf.readUIntLE(2, buf.offset + 1),
+            };
+            revcTimes += Number(prepareResult.columnsNum > 0);
+            revcTimes += Number(prepareResult.paramsNum > 0);
+          }
+          if (
+            revcTimes === 0 ||
+            /** 0xfe是结束标志 EOF: header = 0xfe and length of packet < 9 */
+            (buffer[0] === 0xfe && buffer.length < 9 && --revcTimes <= 0)
+          ) {
+            break;
+          }
+        }
+        if (!prepareResult) {
+          reject(new Error("get pid error"));
           return;
         }
-        Log("有结果集");
-        arr.push(...this.recvDataQueue);
-        this.callbackQueue.unshift(() => {
-          arr.push(...this.recvDataQueue);
-          Log("arr", arr);
-          let buffer = arr.splice(0, 1)[0];
-          // read header
-          const headerInfo: IFieldHeader[] = [];
-          const data: IValue[][] = [];
-          while ((buffer = arr.splice(0, 1)[0])?.length) {
-            const buf = new MysqlBuf(buffer);
-            headerInfo.push({
-              catalog: buf.readString(buf.readIntLenenc()),
-              schema: buf.readString(buf.readIntLenenc()),
-              table: buf.readString(buf.readIntLenenc()),
-              tableOrg: buf.readString(buf.readIntLenenc()),
-              name: buf.readString(buf.readIntLenenc()),
-              nameOrg: buf.readString(buf.readIntLenenc()),
-              characterSet: buf.readUIntLE(2, buf.offset + 1),
-              columnLength: buf.readUIntLE(4),
-              type: buf.readUIntLE(1),
-              flags: buf.readUIntLE(2),
-              decimals: buf.readUIntBE(1),
-            });
-          }
-          Log(headerInfo);
-          while ((buffer = arr.splice(0, 1)[0])?.length) {
-            const buf = new MysqlBuf(buffer);
-            const rowData: IValue[] = [];
-            const nullMap = buf
-              .readUIntLE(Math.floor((headerInfo.length + 7 + 2) / 8), 1)
-              .toString(2)
-              .split("")
-              .map(bit => Number(bit))
-              .reverse();
-            headerInfo.forEach(({ type }, i) => rowData.push(nullMap[i + 2] ? null : this.readValue(type, buf)));
-            data.push(rowData);
-          }
-          Log(data);
-          resolve({ headerInfo, data });
-        });
-      });
-      this.send(sendBuf, index);
-    });
+        this.emit("prepare", sql, prepareResult);
+        resolve(prepareResult);
+      })
+    );
   }
-  public resultsetToObj(resultset: IResultset) {
-    return resultset.data.map(row => {
-      const obj: { [x: string]: IValue } = {};
-      row.forEach((value, index) => {
-        obj[resultset.headerInfo[index].name] = value;
-      });
-      return obj;
-    });
-  }
-  public readValue(type: number, buf: MysqlBuf): IValue {
-    const typeStr = IFieldType[type];
+  private readValue(type: number, buf: MysqlBuf): IMysqlValue {
+    const typeStr = EMysqlFieldType[type];
     switch (typeStr) {
       case "string":
       case "varchar":
@@ -464,63 +422,276 @@ export class Mysql {
     }
     return null;
   }
-  private send(buf: Buffer, index: number) {
-    const head = Buffer.alloc(4);
-    const { length } = buf;
-    const thisTimeSendLen = Math.min(0xffffff, length);
-    head.writeUIntLE(thisTimeSendLen, 0, 3);
-    head[3] = index;
-    if (showTCPpacket) {
-      console.log("\x1B[31m↑\thead\x1B[0m", head, "\x1B[31mbuf\x1B[0m", buf.slice(0, thisTimeSendLen));
+  private async tryToConsume(times = 0) {
+    if (!this.connected || this.task) {
+      return;
     }
-    this.socket.write(Buffer.concat([head, buf.slice(0, thisTimeSendLen)]));
-    if (length !== thisTimeSendLen || length === 0xffffff) {
-      this.send(buf.slice(thisTimeSendLen), index + 1);
+    this.task = this.taskQueue.splice(0, 1)[0];
+    if (!this.task) {
+      return;
     }
-  }
-  private handshakeFn(buffer: Buffer, index: number) {
-    const handshakeBuf = new Buf(buffer);
-    const info = {
-      server_version: handshakeBuf.readString(),
-      connection_id: handshakeBuf.readUIntLE(4),
-      auth_plugin_data_part_1: handshakeBuf.read(8),
-      capability_flag_1: handshakeBuf.read(2, handshakeBuf.offset + 1),
-      character_set: handshakeBuf.readUIntLE(1),
-      status_flags: handshakeBuf.read(2),
-      capability_flags_2: handshakeBuf.read(2),
-      auth_plugin_data_len: handshakeBuf.readUIntLE(1),
-      auth_plugin_data_part_2: handshakeBuf.read(handshakeBuf.lastReadValue - 9, handshakeBuf.offset + 10),
-      auth_plugin_name: handshakeBuf.readString(undefined, handshakeBuf.offset + 1),
-    };
-    Log(info);
-    const loginBuf = new Buf();
-    loginBuf.writeUIntLE(696973, 4);
-    loginBuf.writeUIntLE(3221225472, 4);
-    loginBuf.writeUIntLE(this.character === "utf8" ? 33 : 45, 1);
-    loginBuf.alloc(23, 0);
-    loginBuf.writeStringNUL(this.connectInfo.user, loginBuf.offset + 23);
-    const password_sha1 = SHA1(Buffer.from(this.connectInfo.password));
-    const password = Buffer.alloc(password_sha1.length);
-    SHA1(Buffer.concat([info.auth_plugin_data_part_1, info.auth_plugin_data_part_2, SHA1(password_sha1)])).forEach(
-      (byte, i) => {
-        password[i] = byte ^ password_sha1[i];
+    if (times++ > 1000) {
+      process.nextTick(() => this.tryToConsume(0));
+      return;
+    }
+    const { sql, params, callback } = this.task;
+    let prepare = this.prepareMap.get(sql);
+    if (!prepare) {
+      try {
+        prepare = await this.getPrepare(sql);
+      } catch (e: any) {
+        callback(Error(String(e?.message ?? e)));
+        this.task = undefined;
+        this.tryToConsume(times);
+        return;
       }
+      this.prepareMap.set(sql, prepare);
+    }
+    // console.log("pid", prepare, sql, params);
+    if (prepare.paramsNum !== params.length) {
+      callback(
+        new Error(
+          `入参与预处理语句的参数对不上。入参数量${params.length}，需要参数${prepare.paramsNum}，预处理语句${sql}`
+        )
+      );
+      this.task = undefined;
+      this.tryToConsume();
+      return;
+    }
+    const buf = new Buf();
+    buf.writeUIntLE(0x17);
+    buf.writeUIntLE(prepare.statementId, 4);
+    buf.writeUIntLE(0); // 0x00: CURSOR_TYPE_NO_CURSOR、0x01: CURSOR_TYPE_READ_ONLY、0x02: CURSOR_TYPE_FOR_UPDATE、0x04: CURSOR_TYPE_SCROLLABLE
+    buf.writeUIntLE(1, 4);
+    buf.writeUIntLE(
+      Number(
+        params.reduce(
+          (previousValue, currentValue, index) => Number(previousValue) + (currentValue === null ? 1 << index : 0),
+          0
+        )
+      )
     );
-    loginBuf.writeUIntLE(password.length, 1);
-    loginBuf.write(password);
-    loginBuf.writeStringNUL(this.connectInfo.database);
-    loginBuf.writeStringNUL(info.auth_plugin_name);
-    loginBuf.offset = 0;
-    const info2 = {
-      capability_flags: loginBuf.read(4),
-      max_packet_size: loginBuf.readUIntLE(4),
-      character_set: loginBuf.readUIntLE(1) === 33 ? "utf8" : "utf8mb4",
-      username: loginBuf.readString(undefined, loginBuf.offset + 23),
-      password: loginBuf.read(loginBuf.readUIntLE(1)),
-      database: loginBuf.readString(),
-      auth_plugin_name: loginBuf.readString(),
-    };
-    Log(info2);
-    this.send(loginBuf.buffer, index + 1);
+    buf.writeUIntLE(1);
+    const dataBuf = new MysqlBuf();
+    params.forEach(param => {
+      if (typeof param === "number") {
+        let len = 1;
+        while (len < 8 && 2 ** (len * 8) <= param) {
+          len *= 2;
+        }
+        if (len <= 8) {
+          buf.writeUIntLE(len === 4 ? 3 : len, 2);
+          dataBuf.writeUIntLE(param, len);
+          return;
+        }
+      } else if (typeof param === "object") {
+        if (param instanceof Buffer) {
+          buf.writeUIntLE(0xfb, 2);
+          dataBuf.writeIntLenenc(param.length);
+          dataBuf.write(param);
+          return;
+        } else if (param === null) {
+          buf.writeUIntLE(6, 2);
+          return;
+        } else if (param instanceof Date) {
+          param = this.dateToString(param);
+        } else {
+          param = JSON.stringify(param);
+        }
+      }
+      param = String(param);
+      buf.writeUIntLE(0xfd, 2);
+      dataBuf.writeStringLenenc(param);
+    });
+    this.reliableSocket.getSocket(async sock => {
+      const sendBuffer = Buffer.concat([buf.buffer, dataBuf.buffer]);
+      let len = sendBuffer.length;
+      let i = 0;
+      let writeLen = 0;
+      while (len > 0) {
+        const nowWriteLen = Math.min(0xffffff, len);
+        len -= nowWriteLen;
+        const headBuf = Buffer.alloc(4, i);
+        headBuf.writeUIntLE(nowWriteLen, 0, 3);
+        sock.write(Buffer.concat([headBuf, sendBuffer.subarray(writeLen, (writeLen += nowWriteLen))]));
+        i++;
+      }
+      if (!this.readSocket) {
+        throw new Error("not readSocket");
+      }
+      /** 需要接收的次数 */
+      let revcTimes = 2;
+      const headerInfo: IMysqlFieldHeader[] = [];
+      const data: IMysqlValue[][] = [];
+      while (1) {
+        const headBuf = this.readSocket.readBufferSync(4);
+        const head = headBuf instanceof Promise ? await headBuf : headBuf;
+        len = head.readIntLE(0, 3);
+        if (!len) {
+          callback(new Error("no len?"));
+          break;
+        }
+        const bufferdata = this.readSocket.readBufferSync(len);
+        const buffer = bufferdata instanceof Promise ? await bufferdata : bufferdata;
+        if (!buffer) {
+          callback(new Error("no buffer"));
+          break;
+        }
+
+        if (buffer[0] === 0xff) {
+          callback(new Error(String(buffer.subarray(3))));
+          break;
+        }
+        /** 无结果集 */
+        if (prepare?.columnsNum === 0) {
+          const buf = new MysqlBuf(buffer);
+          callback(null, {
+            affectedRows: buf.readIntLenenc(1),
+            lastInsertId: buf.readIntLenenc(),
+            statusFlags: buf.readUIntLE(2),
+            warningsNumber: buf.readUIntLE(2),
+            message: buf.readString(),
+          });
+          break;
+        }
+        /** 忽略第一个[Result Set Header] */
+        if (buffer.length <= 2) {
+          continue;
+        }
+        //  console.log(buffer);
+        if (buffer[0] === 0xfe && buffer.length < 9) {
+          if (--revcTimes <= 0) {
+            callback(null, { headerInfo, data });
+            break;
+          }
+        } else if (revcTimes === 2) {
+          /** 读取列信息 */
+          const buf = new MysqlBuf(buffer);
+          headerInfo.push({
+            catalog: buf.readString(buf.readIntLenenc()),
+            schema: buf.readString(buf.readIntLenenc()),
+            table: buf.readString(buf.readIntLenenc()),
+            tableOrg: buf.readString(buf.readIntLenenc()),
+            name: buf.readString(buf.readIntLenenc()),
+            nameOrg: buf.readString(buf.readIntLenenc()),
+            characterSet: buf.readUIntLE(2, buf.offset + 1),
+            columnLength: buf.readUIntLE(4),
+            type: buf.readUIntLE(1),
+            flags: buf.readUIntLE(2),
+            decimals: buf.readUIntBE(1),
+          });
+        } else {
+          /** 读取行数据 */
+          const buf = new MysqlBuf(buffer);
+          const rowData: IMysqlValue[] = [];
+          const nullMap = buf
+            .readUIntLE(Math.floor((headerInfo.length + 7 + 2) / 8), 1)
+            .toString(2)
+            .split("")
+            .map(bit => Number(bit))
+            .reverse();
+          headerInfo.forEach(({ type }, i) => rowData.push(nullMap[i + 2] ? null : this.readValue(type, buf)));
+          data.push(rowData);
+        }
+      }
+      this.task = undefined;
+      this.tryToConsume(times);
+    });
   }
+  public format: (source: IMysqlResultset) => { [x: string]: IMysqlValue }[] = ({ headerInfo, data }) =>
+    data.map(row => headerInfo.reduce((obj, header, i) => ({ ...obj, [header.name]: row[i] }), {}));
+  public query = (sql: string, params: IMysqlValue[]): Promise<IMysqlResult | { [x: string]: IMysqlValue }[]> =>
+    new Promise((resolve, reject) => {
+      this.taskQueue.push({
+        sql,
+        params,
+        callback: (err, value) => {
+          if (err || !value) {
+            reject(err);
+            return;
+          }
+          resolve("data" in value ? this.format(value) : value);
+        },
+      });
+      this.tryToConsume();
+    });
+  public queryRaw = (task: IMysqltask): void => {
+    this.taskQueue.push(task);
+  };
 }
+
+// 测试用例
+// (async () => {
+//   const mysql = new Mysql({
+//     host: "127.0.0.1",
+//     port: 3306,
+//     user: "root",
+//     password: "root123",
+//     database: "information_schema",
+//   });
+//   mysql.on("handshake", handshake => {
+//     console.log("handshake");
+//   });
+//   mysql.once("loginError", (a, b) => {
+//     console.log(a, b);
+//     mysql.reliableSocket.close();
+//   });
+//   mysql.on("connected", () => {
+//     console.log("connected");
+//   });
+//   mysql.on("prepare", (...a) => {
+//     console.log("prepare", ...a);
+//   });
+//   mysql
+//     .query("SELECT * FROM inf.`testnull`", [])
+//     .then(a => {
+//       console.log(a);
+//     })
+//     .catch(e => {
+//       console.log("报错了");
+//       console.error(e);
+//     });
+//   mysql
+//     .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
+//     .then(a => {
+//       console.log(a);
+//     })
+//     .catch(e => {
+//       console.log("报错了");
+//       console.error(e);
+//     });
+//   mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
+//   mysql.queryRaw({
+//     sql: "SELECT * FROM INFO.student LIMIT ?",
+//     params: [10],
+//     callback(err, data) {
+//       console.log(data);
+//     },
+//   });
+
+//   const ignoreDB = ["information_schema", "mysql", "performance_schema"];
+//   mysql
+//     .query(
+//       `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
+//         .map(_ => "?")
+//         .join(",")});`,
+//       ignoreDB
+//     )
+//     .then(console.log);
+//   const a = await mysql.query(
+//     `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
+//     []
+//   );
+
+//   console.log(a);
+//   const [result1, result2] = await Promise.all([
+//     mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
+
+//     mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
+//       "2022-02-14 15:33:39",
+//       172017001,
+//     ]),
+//   ]);
+//   console.log("result1:", result1);
+//   console.log("result2:", result2);
+// })();
