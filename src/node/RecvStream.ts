@@ -147,6 +147,32 @@ export class RecvStream {
     sourceStream["t"] = this;
   }
 
+  /** readBuffer的“同步”写法 */
+  public readBufferSync: (
+    readSize: number | ((byte: number) => boolean),
+    unshift?: boolean
+  ) => Promise<Buffer> | Buffer = (readSize, unshift = false) => {
+    if (this.tempBuffer.length > 0) {
+      this.tempBuffer[0] = Buffer.concat([...this.tempBuffer]);
+      this.tempBuffer.length = 1;
+    }
+    if (readSize instanceof Function) {
+      const index = this.tempBuffer[0].findIndex(readSize);
+      if (index >= 0) {
+        readSize = index;
+      }
+    }
+    if (!(readSize instanceof Function) && this.tempBufferSize >= readSize) {
+      const buffer = this.tempBuffer[0];
+      this.tempBuffer[0] = buffer.subarray(readSize);
+      this.tempBufferSize = this.tempBuffer[0].length;
+      return buffer.subarray(0, readSize);
+    }
+    return new Promise(resolve => {
+      this.addNewTask({ type: "buffer", readSize, callback: resolve }, unshift);
+    });
+  };
+
   /** 读取所有给定的字节，读完后放在buffer里。新建的任务将置于队列的【队尾】（先进先出） */
   public readBufferAfter: IRecvStreamReadBuffer = (readSize, callback) => {
     this.addNewTask({ type: "buffer", readSize, callback });
@@ -274,3 +300,26 @@ export class SubReadStream extends stream.Readable {
 //   console.log(5, [...buffer]);
 // });
 // setTimeout(() => {}, 1000000);
+
+// (async () => {
+//   let i = 1024 * 10 + 2;
+//   while (i--) {
+//     const readBufferSync = recvStream.readBufferSync(2);
+//     const buffer = readBufferSync instanceof Promise ? await readBufferSync : readBufferSync;
+//     // console.log(buffer);
+//   }
+//   let times = 1000;
+//   recvStream.readBuffer(
+//     byte => byte === 0x24 && !--times,
+//     buffer => {
+//       console.log("不定长", buffer.length, [...buffer]);
+//       recvStream.readBuffer(6, buffer => {
+//         console.log(6, [...buffer]);
+//       });
+//       recvStream.readStream(100, stream1 => {
+//         console.log(100, recvStream.sourceStream.readableFlowing);
+//         stream1.pipe(require("fs").createWriteStream("1.bin"));
+//       });
+//     }
+//   );
+// })();
