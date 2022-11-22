@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import { XML } from "./node/XML";
 import { Buf } from "./node/Buf";
-import { Mysql } from "./node/mysql1";
+import { Mysql } from "./node/Mysql";
 import { ReliableSocket } from "./node/ReliableSocket";
 const text = `<xml>
   <events date="01-10-2009" color="0x99CC00" selected="true">

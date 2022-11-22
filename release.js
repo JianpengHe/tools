@@ -24,7 +24,9 @@ const PATH = "release";
       fileMap.set(path + "/" + file.name, {
         name: path + "/" + file.name,
         path,
-        fileData: String(await fs.promises.readFile("src" + path + "/" + file.name)).split("\n"),
+        fileData: String(await fs.promises.readFile("src" + path + "/" + file.name))
+          .split("\n")
+          .map(str => (/^\/\//.test(str.trim()) ? "" : str)),
         rely: [],
         sysRely: [],
         complete: [],
