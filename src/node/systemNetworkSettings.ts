@@ -1,5 +1,8 @@
 import * as child_process from "child_process";
 import * as os from "os";
+import * as net from "net";
+import * as tls from "tls";
+import * as crypto from "crypto";
 import { afterExit } from "./afterExit";
 import { Buf } from "./Buf";
 
@@ -212,3 +215,72 @@ export const getProcessNameByPort = (remotePort: number = 0, localPort: number =
       );
     })
   );
+
+/** 使用Trojan代理协议 */
+export const createTrojanSocket: (
+  /** 传入由Trojan的“订阅内容”或trojan开头的URL */
+  trojanTarget: string,
+  outsideHost: string,
+  outsidePort: number
+) => Promise<net.Socket> = (trojanTarget, outsideHost, outsidePort) =>
+  new Promise((resolve, reject) => {
+    const reg = /^trojan\:/;
+    if (!reg.test(trojanTarget)) {
+      trojanTarget = String(Buffer.from(trojanTarget, "base64"));
+    }
+    if (!reg.test(trojanTarget)) {
+      reject(new Error("转换协议失败"));
+      return;
+    }
+    const { hostname, port, searchParams, username } = new URL(trojanTarget.replace(reg, "http:"));
+    const sock = tls.connect({
+      host: hostname,
+      port: Number(port),
+      // rejectUnauthorized: false,
+      servername: searchParams.get("sni") || undefined,
+    });
+    const buf = new Buf();
+    buf.writeStringPrefix(crypto.createHash("sha224").update(username).digest("hex"), () => {
+      return undefined;
+    });
+    buf.write(Buffer.from([0x0d, 0x0a, 1, 3]));
+    buf.writeStringPrefix(outsideHost, len => {
+      buf.writeUIntBE(len, 1);
+      return undefined;
+    });
+    buf.writeUIntBE(outsidePort, 2);
+    buf.write(Buffer.from([0x0d, 0x0a]));
+    sock.write(buf.buffer);
+    resolve(sock);
+  });
+
+//测试用例
+// const trojanTarget = "dHxxxxxx==";
+// // const host = "2022.ip138.com";
+// const host = "www.google.com";
+// const port = 443;
+// const req = require("https")
+//   .request(
+//     {
+//       path: "/",
+//       method: "get",
+//       port,
+//       host,
+//       createConnection(_, oncreate) {
+//         createTrojanSocket(trojanTarget, host, port).then(trojanSock => {
+//           const httpsock = new tls.TLSSocket(trojanSock);
+//           setTimeout(() => {
+//             oncreate(null, httpsock);
+//           }, 1000);
+//         });
+//       },
+//     },
+//     async res => {
+//       const body: any = [];
+//       for await (const chuck of res) {
+//         body.push(chuck);
+//       }
+//       console.log(String(Buffer.concat(body)));
+//     }
+//   )
+//   .end();
