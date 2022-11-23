@@ -1,6 +1,7 @@
 import { Buf } from "./Buf";
 import * as net from "net";
 import * as crypto from "crypto";
+import * as stream from "stream";
 import { ReliableSocket } from "./ReliableSocket";
 import { RecvStream } from "./RecvStream";
 import { TypedEventEmitter } from "./utils";
@@ -156,7 +157,7 @@ export type IMysqlPrepareResult = {
 };
 export type IMysqltask = {
   sql: string;
-  params: IMysqlValue[];
+  params: (IMysqlValue | stream.Readable)[];
   callback: (err: Error | null, value?: IMysqlResult | IMysqlResultset) => void;
 };
 export type IMysqlEvents = {
@@ -199,7 +200,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     }
     const headBuf = this.readSocket.readBufferSync(4);
     const head = headBuf instanceof Promise ? await headBuf : headBuf;
-    const len = head.readIntLE(0, 3);
+    const len = head.readUIntLE(0, 3);
     if (!len) {
       return [head];
     }
@@ -306,7 +307,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         while (1) {
           const headBuf = this.readSocket.readBufferSync(4);
           const head = headBuf instanceof Promise ? await headBuf : headBuf;
-          len = head.readIntLE(0, 3);
+          len = head.readUIntLE(0, 3);
           if (!len) {
             reject(new Error("pid: no len?"));
             return;
@@ -473,37 +474,49 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     );
     buf.writeUIntLE(1);
     const dataBuf = new MysqlBuf();
-    params.forEach(param => {
-      if (typeof param === "number") {
-        let len = 1;
-        while (len < 8 && 2 ** (len * 8) <= param) {
-          len *= 2;
-        }
-        if (len <= 8) {
-          buf.writeUIntLE(len === 4 ? 3 : len, 2);
-          dataBuf.writeUIntLE(param, len);
-          return;
-        }
-      } else if (typeof param === "object") {
-        if (param instanceof Buffer) {
-          buf.writeUIntLE(0xfb, 2);
-          dataBuf.writeIntLenenc(param.length);
-          dataBuf.write(param);
-          return;
-        } else if (param === null) {
-          buf.writeUIntLE(6, 2);
-          return;
-        } else if (param instanceof Date) {
-          param = this.dateToString(param);
-        } else {
-          param = JSON.stringify(param);
-        }
-      }
-      param = String(param);
-      buf.writeUIntLE(0xfd, 2);
-      dataBuf.writeStringLenenc(param);
-    });
+
     this.reliableSocket.getSocket(async sock => {
+      if (!prepare) {
+        this.task = undefined;
+        this.tryToConsume(times);
+        return;
+      }
+      for (let index = 0; index < params.length; index++) {
+        let param = params[index];
+        if (typeof param === "number") {
+          let len = 1;
+          while (len < 8 && 2 ** (len * 8) <= param) {
+            len *= 2;
+          }
+          if (len <= 8) {
+            buf.writeUIntLE(len === 4 ? 3 : len, 2);
+            dataBuf.writeUIntLE(param, len);
+            continue;
+          }
+        } else if (typeof param === "object") {
+          if (param instanceof Buffer) {
+            buf.writeUIntLE(0xfb, 2);
+            dataBuf.writeIntLenenc(param.length);
+            dataBuf.write(param);
+            continue;
+          } else if (param === null) {
+            buf.writeUIntLE(6, 2);
+            continue;
+          } else if (param instanceof Date) {
+            param = this.dateToString(param);
+          } else if (param instanceof stream.Readable) {
+            param.pause();
+            buf.writeUIntLE(0xfb, 2);
+            await this.sendLongData(param, prepare.statementId, index, sock);
+            continue;
+          } else {
+            param = JSON.stringify(param);
+          }
+        }
+        param = String(param);
+        buf.writeUIntLE(0xfd, 2);
+        dataBuf.writeStringLenenc(param);
+      }
       const sendBuffer = Buffer.concat([buf.buffer, dataBuf.buffer]);
       let len = sendBuffer.length;
       let i = 0;
@@ -523,16 +536,17 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       let revcTimes = 2;
       const headerInfo: IMysqlFieldHeader[] = [];
       const data: IMysqlValue[][] = [];
+      const lastBuffer: Buffer[] = [];
       while (1) {
         const headBuf = this.readSocket.readBufferSync(4);
         const head = headBuf instanceof Promise ? await headBuf : headBuf;
-        len = head.readIntLE(0, 3);
+        len = head.readUIntLE(0, 3);
         if (!len) {
           callback(new Error("no len?"));
           break;
         }
         const bufferdata = this.readSocket.readBufferSync(len);
-        const buffer = bufferdata instanceof Promise ? await bufferdata : bufferdata;
+        let buffer = bufferdata instanceof Promise ? await bufferdata : bufferdata;
         if (!buffer) {
           callback(new Error("no buffer"));
           break;
@@ -554,11 +568,20 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
           });
           break;
         }
+        if (buffer.length === 16777215) {
+          lastBuffer.push(buffer);
+          continue;
+        }
         /** 忽略第一个[Result Set Header] */
         if (buffer.length <= 2) {
           continue;
         }
-        //  console.log(buffer);
+        if (lastBuffer.length) {
+          lastBuffer.push(buffer);
+          buffer = Buffer.concat(lastBuffer);
+          lastBuffer.length = 0;
+        }
+        // console.log(buffer);
         if (buffer[0] === 0xfe && buffer.length < 9) {
           if (--revcTimes <= 0) {
             callback(null, { headerInfo, data });
@@ -598,6 +621,49 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       this.tryToConsume(times);
     });
   }
+  private sendLongData = (
+    param: stream.Readable,
+    statement_id: number,
+    param_id: number,
+    sock: net.Socket
+  ): Promise<void> =>
+    new Promise(resolve => {
+      const tempBufs: Buffer[] = [];
+      let tempBufsLen = 0;
+      const maxSize = 15 * 1048576;
+      const sendBuf = (buffer: Buffer): boolean => {
+        const buf = new Buf();
+        buf.writeUIntLE(buffer.length + 7, 3);
+        buf.writeUIntLE(0, 1);
+        buf.writeUIntLE(0x18, 1);
+        buf.writeUIntLE(statement_id, 4);
+        buf.writeUIntLE(param_id, 2);
+        return sock.write(Buffer.concat([buf.buffer, buffer]));
+      };
+      param.on("data", chuck => {
+        tempBufs.push(chuck);
+        tempBufsLen += chuck.length;
+
+        while (tempBufsLen >= maxSize) {
+          tempBufsLen -= maxSize;
+          const buffer = Buffer.concat(tempBufs);
+          tempBufs[0] = buffer.subarray(maxSize);
+          tempBufs.length = 1;
+          if (!sendBuf(buffer.subarray(0, maxSize))) {
+            param.pause();
+            sock.once("drain", () => param.resume());
+            break;
+          }
+        }
+      });
+      param.on("end", () => {
+        const buffer = Buffer.concat(tempBufs);
+        tempBufs.length = 0;
+        sendBuf(buffer.subarray(0, maxSize));
+        resolve();
+      });
+      param.resume();
+    });
   public format: (source: IMysqlResultset) => { [x: string]: IMysqlValue }[] = ({ headerInfo, data }) =>
     data.map(row => headerInfo.reduce((obj, header, i) => ({ ...obj, [header.name]: row[i] }), {}));
   public query = (sql: string, params: IMysqlValue[]): Promise<IMysqlResult | { [x: string]: IMysqlValue }[]> =>
@@ -642,56 +708,63 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
 //   mysql.on("prepare", (...a) => {
 //     console.log("prepare", ...a);
 //   });
-//   mysql
-//     .query("SELECT * FROM inf.`testnull`", [])
-//     .then(a => {
-//       console.log(a);
-//     })
-//     .catch(e => {
-//       console.log("报错了");
-//       console.error(e);
-//     });
-//   mysql
-//     .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
-//     .then(a => {
-//       console.log(a);
-//     })
-//     .catch(e => {
-//       console.log("报错了");
-//       console.error(e);
-//     });
-//   mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
-//   mysql.queryRaw({
-//     sql: "SELECT * FROM INFO.student LIMIT ?",
-//     params: [10],
-//     callback(err, data) {
-//       console.log(data);
-//     },
+// mysql
+//   .query("SELECT * FROM inf.`testnull`", [])
+//   .then(a => {
+//     console.log(a);
+//   })
+//   .catch(e => {
+//     console.log("报错了");
+//     console.error(e);
 //   });
+// mysql
+//   .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
+//   .then(a => {
+//     console.log(a);
+//   })
+//   .catch(e => {
+//     console.log("报错了");
+//     console.error(e);
+//   });
+// mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
+// mysql.queryRaw({
+//   sql: "SELECT * FROM INFO.student LIMIT ?",
+//   params: [10],
+//   callback(err, data) {
+//     console.log(data);
+//   },
+// });
 
-//   const ignoreDB = ["information_schema", "mysql", "performance_schema"];
-//   mysql
-//     .query(
-//       `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
-//         .map(_ => "?")
-//         .join(",")});`,
-//       ignoreDB
-//     )
-//     .then(console.log);
-//   const a = await mysql.query(
-//     `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
-//     []
+// const ignoreDB = ["information_schema", "mysql", "performance_schema"];
+// mysql
+//   .query(
+//     `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
+//       .map(_ => "?")
+//       .join(",")});`,
+//     ignoreDB
+//   )
+//   .then(console.log);
+// const a = await mysql.query(
+//   `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
+//   []
+// );
+
+// console.log(a);
+// const [result1, result2] = await Promise.all([
+//   mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
+
+//   mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
+//     "2022-02-14 15:33:39",
+//     172017001,
+//   ]),
+// ]);
+// console.log("result1:", result1);
+// console.log("result2:", result2);
+// const s = require("fs").createReadStream("d:/t.bin", { end: 320 * 1024 * 1024 });
+// setTimeout(async () => {
+//   console.log(
+//     await mysql.query("UPDATE info.`student` SET `bo` = ? WHERE `student`.`studentId` = ?", [s, "172017002"])
 //   );
-
-//   console.log(a);
-//   const [result1, result2] = await Promise.all([
-//     mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
-
-//     mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
-//       "2022-02-14 15:33:39",
-//       172017001,
-//     ]),
-//   ]);
-//   console.log("result1:", result1);
-//   console.log("result2:", result2);
+// }, 1000);
+//   console.log(await mysql.query(`SELECT * FROM info.student LIMIT 10`, []));
 // })();
