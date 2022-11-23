@@ -99,65 +99,117 @@ export enum EMysqlFieldFlags {
   set = 0x0800,
 }
 export type IMysqlConnect = {
+  /** 数据库IP/域名 */
   host: string;
+  /** 数据库端口 */
   port: number;
+  /** 数据库用户 */
   user: string;
+  /** 数据库密码 */
   password: string;
+  /** 登录时选择的数据库 */
   database: string;
+  /** 字符集 */
   character?: "utf8" | "utf8mb4";
+  /** 输出是否转换成时间戳 */
+  convertToTimestamp?: boolean;
 };
 export type IMysqlHandshake = {
+  /** 服务器协议版本号 */
   protocol_version: number;
+  /** 服务器版本信息 */
   server_version: string;
+  /** 服务器线程ID */
   connection_id: number;
+  /** 挑战随机数 */
   auth_plugin_data_part_1: Buffer;
+  /** 服务器权能标志 */
   capability_flag_1: number;
+  /** 字符编码 */
   character_set: number;
+  /** 服务器状态 */
   status_flags: number;
+  /** 挑战随机数2 */
   capability_flags_2: number;
+
   auth_plugin_data_len: number;
   auth_plugin_data_part_2: Buffer;
   auth_plugin_name: string;
 };
 export type IMysqlHandshakeRes = {
+  /** 客户端权能标志 */
   capability_flags: number;
+  /** 最大消息长度 */
   max_packet_size: number;
+  /** 字符编码 */
   character_set: "utf8" | "utf8mb4";
+  /** 用户名 */
   username: string;
+  /** 挑战认证数据 */
   password: string;
+  /** 数据库名称 */
   database: string;
 };
 export type IMysqlFieldHeader = {
+  /** 目录名称 */
   catalog: string;
+  /** 数据库名称 */
   schema: string;
+  /** 数据表名称 */
   table: string;
+  /** 数据表原始名称 */
   tableOrg: string;
+  /** 列（字段）名称 */
   name: string;
+  /** 列（字段）原始名称 */
   nameOrg: string;
+  /** 字符编码 */
   characterSet: number;
+  /** 列（字段）长度 */
   columnLength: number;
+  /** 列（字段）类型 */
   type: EMysqlFieldType;
+  /** 列（字段）标志 */
   flags: EMysqlFieldFlags;
+  /** 整型值精度 */
   decimals: number;
+  /** 是否是固定长度 */
+  noFixedLength?: boolean;
 };
-export type IMysqlValue = number | string | Date | Buffer | null;
+export type IMysqlValue = number | string | Date | Buffer | null | undefined;
 export type IMysqlResult = {
+  /** 受影响行数 */
   affectedRows: number;
+  /** 索引ID值 */
   lastInsertId: number;
+  /** 服务器状态 */
   statusFlags: number;
+  /** 告警计数 */
   warningsNumber: number;
+  /** 服务器消息 */
   message: string;
 };
 export type IMysqlResultset = { headerInfo: IMysqlFieldHeader[]; data: IMysqlValue[][] };
 export type IMysqlPrepareResult = {
+  /** 预处理语句的ID值 */
   statementId: number;
+  /** 所需字段数量 */
   columnsNum: number;
+  /** 参数数量 */
   paramsNum: number;
+  /** 警告数量 */
   warningCount: number;
 };
 export type IMysqltask = {
   sql: string;
   params: (IMysqlValue | stream.Readable)[];
+  /** 遇到不确定长度的“长数据”单元格时触发onLongData回调，开发者可以视情况返回可写流，这个单元格的值就流向这个可写流，不返回任何东西就缓存下来 */
+  onLongData?: (
+    len: number,
+    columnInfo: IMysqlFieldHeader,
+    index: number,
+    receivedDataNow: IMysqlResultset
+  ) => stream.Writable | void;
   callback: (err: Error | null, value?: IMysqlResult | IMysqlResultset) => void;
 };
 export type IMysqlEvents = {
@@ -165,6 +217,7 @@ export type IMysqlEvents = {
   loginError: (errNo: number, errMsg: string) => void;
   connected: () => void;
   prepare: (sql: string, prepareResult: IMysqlPrepareResult) => void;
+  headerInfo: (headerInfo: IMysqlFieldHeader, sql: string) => void;
 };
 
 export class Mysql extends TypedEventEmitter<IMysqlEvents> {
@@ -176,11 +229,26 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
   private task?: IMysqltask;
   private taskQueue: IMysqltask[] = [];
   private connected = false;
+  private noFixedLengthType = [
+    "string",
+    "varchar",
+    "var_string",
+    "enum",
+    "set",
+    "long_blob",
+    "medium_blob",
+    "blob",
+    "tiny_blob",
+    "geometry",
+    "bit",
+    "decimal",
+    "newdecimal",
+  ];
   constructor(connect: IMysqlConnect) {
     super();
     this.connectInfo = connect;
     this.reliableSocket = new ReliableSocket(
-      { host: connect.host, port: connect.port },
+      { host: connect.host ?? "127.0.0.1", port: connect.port ?? 3306 },
       {
         onConnect: socket => {
           this.socket = socket;
@@ -350,78 +418,87 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       })
     );
   }
-  private readValue(type: number, buf: MysqlBuf): IMysqlValue {
-    const typeStr = EMysqlFieldType[type];
-    switch (typeStr) {
-      case "string":
-      case "varchar":
-      case "var_string":
-      case "enum":
-      case "set":
-      case "long_blob":
-      case "medium_blob":
-      case "blob":
-      case "tiny_blob":
-      case "geometry":
-      case "bit":
-      case "decimal":
-      case "newdecimal":
-        const len = buf.readIntLenenc();
-        const buffer = buf.read(len);
-        if (typeStr.includes("string") || typeStr === "var_string" || typeStr === "enum") {
-          return String(buffer);
-        }
-        return buffer;
-      case "longlong":
-        return buf.readUIntLE(8);
-      case "long":
-      case "int24":
-        return buf.readUIntLE(4);
-      case "short":
-      case "year":
-        return buf.readUIntLE(2);
-      case "tiny":
-        return buf.readUIntLE(1);
-      case "double":
-        return buf.read(8).readDoubleLE();
-      case "float":
-        return buf.read(4).readFloatLE();
-      case "date":
-      case "datetime":
-      case "timestamp":
-        const date = new Date("2000-01-01 00:00:00");
-        const dateBuffer = buf.read(buf.readIntLenenc());
-        switch (dateBuffer.length) {
-          case 0:
-            return new Date("");
-          case 11:
-            date.setMilliseconds(dateBuffer.readFloatLE(7));
-          case 7:
-            date.setSeconds(dateBuffer[6]);
-            date.setMinutes(dateBuffer[5]);
-            date.setHours(dateBuffer[4]);
-          case 4:
-            date.setDate(dateBuffer[3]);
-            date.setMonth(dateBuffer[2] - 1);
-            date.setFullYear(dateBuffer.readInt16LE());
-        }
-        return date;
-      case "time":
-        const timeBuffer = buf.read(buf.readIntLenenc());
-        let time = 0;
-        switch (timeBuffer.length) {
-          case 12:
-            time += timeBuffer.readFloatLE(8);
-          case 8:
-            time += timeBuffer[7];
-            time += timeBuffer[6] * 60;
-            time += timeBuffer[5] * 60 * 60;
-            time += timeBuffer.readInt32LE(1);
-            time *= timeBuffer[0] === 1 ? -1 : 1;
-        }
-        return time;
+  private readValue(type: number, buf: MysqlBuf, initLen?: number): IMysqlValue {
+    try {
+      const typeStr = EMysqlFieldType[type];
+      switch (typeStr) {
+        case "string":
+        case "varchar":
+        case "var_string":
+        case "enum":
+        case "set":
+        case "long_blob":
+        case "medium_blob":
+        case "blob":
+        case "tiny_blob":
+        case "geometry":
+        case "bit":
+        case "decimal":
+        case "newdecimal":
+          const len = initLen ?? buf.readIntLenenc();
+          if (buf.buffer.length - buf.offset < len) {
+            /** 如果已缓存的buffer太短不能满足len，就返回undefined */
+            return undefined;
+          }
+          const buffer = buf.read(len);
+          if (typeStr.includes("string") || typeStr === "var_string" || typeStr === "enum") {
+            return String(buffer);
+          }
+          return buffer;
+        case "longlong":
+          return buf.readUIntLE(8);
+        case "long":
+        case "int24":
+          return buf.readUIntLE(4);
+        case "short":
+        case "year":
+          return buf.readUIntLE(2);
+        case "tiny":
+          return buf.readUIntLE(1);
+        case "double":
+          return buf.read(8).readDoubleLE();
+        case "float":
+          return buf.read(4).readFloatLE();
+        case "date":
+        case "datetime":
+        case "timestamp":
+          const date = new Date("2000-01-01 00:00:00");
+          const dateBuffer = buf.read(buf.readIntLenenc());
+          switch (dateBuffer.length) {
+            case 0:
+              return new Date("");
+            case 11:
+              date.setMilliseconds(dateBuffer.readFloatLE(7));
+            case 7:
+              date.setSeconds(dateBuffer[6]);
+              date.setMinutes(dateBuffer[5]);
+              date.setHours(dateBuffer[4]);
+            case 4:
+              date.setDate(dateBuffer[3]);
+              date.setMonth(dateBuffer[2] - 1);
+              date.setFullYear(dateBuffer.readInt16LE());
+          }
+          return this.connectInfo.convertToTimestamp ? date.getTime() : date;
+        case "time":
+          const timeBuffer = buf.read(buf.readIntLenenc());
+          let time = 0;
+          switch (timeBuffer.length) {
+            case 12:
+              time += timeBuffer.readFloatLE(8);
+            case 8:
+              time += timeBuffer[7];
+              time += timeBuffer[6] * 60;
+              time += timeBuffer[5] * 60 * 60;
+              time += timeBuffer.readInt32LE(1);
+              time *= timeBuffer[0] === 1 ? -1 : 1;
+          }
+          return time;
+      }
+      return null;
+    } catch (e) {
+      /** 如果已缓存的buffer太短不能满足len，会导致越界，就返回undefined */
+      return undefined;
     }
-    return null;
   }
   private async tryToConsume(times = 0) {
     if (!this.connected || this.task) {
@@ -435,7 +512,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       process.nextTick(() => this.tryToConsume(0));
       return;
     }
-    const { sql, params, callback } = this.task;
+    const { sql, params, callback, onLongData } = this.task;
     let prepare = this.prepareMap.get(sql);
     if (!prepare) {
       try {
@@ -536,7 +613,13 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       let revcTimes = 2;
       const headerInfo: IMysqlFieldHeader[] = [];
       const data: IMysqlValue[][] = [];
-      const lastBuffer: Buffer[] = [];
+      let lastBuffer: Buffer | undefined;
+      let recvStream: stream.Writable | undefined;
+      let recvStreamLen = 0;
+      /** 第几个单元格 */
+      let fieldIndex = 0;
+      /** 第几条记录 */
+      let recordIndex = -1;
       while (1) {
         const headBuf = this.readSocket.readBufferSync(4);
         const head = headBuf instanceof Promise ? await headBuf : headBuf;
@@ -568,20 +651,11 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
           });
           break;
         }
-        if (buffer.length === 16777215) {
-          lastBuffer.push(buffer);
-          continue;
-        }
         /** 忽略第一个[Result Set Header] */
         if (buffer.length <= 2) {
           continue;
         }
-        if (lastBuffer.length) {
-          lastBuffer.push(buffer);
-          buffer = Buffer.concat(lastBuffer);
-          lastBuffer.length = 0;
-        }
-        // console.log(buffer);
+        /** 结束包 */
         if (buffer[0] === 0xfe && buffer.length < 9) {
           if (--revcTimes <= 0) {
             callback(null, { headerInfo, data });
@@ -590,7 +664,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         } else if (revcTimes === 2) {
           /** 读取列信息 */
           const buf = new MysqlBuf(buffer);
-          headerInfo.push({
+          const info: IMysqlFieldHeader = {
             catalog: buf.readString(buf.readIntLenenc()),
             schema: buf.readString(buf.readIntLenenc()),
             table: buf.readString(buf.readIntLenenc()),
@@ -600,21 +674,98 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
             characterSet: buf.readUIntLE(2, buf.offset + 1),
             columnLength: buf.readUIntLE(4),
             type: buf.readUIntLE(1),
+            noFixedLength: this.noFixedLengthType.includes(EMysqlFieldType[buf.lastReadValue]),
             flags: buf.readUIntLE(2),
             decimals: buf.readUIntBE(1),
-          });
+          };
+          this.emit("headerInfo", info, sql);
+          headerInfo.push(info);
+          fieldIndex++;
         } else {
           /** 读取行数据 */
-          const buf = new MysqlBuf(buffer);
-          const rowData: IMysqlValue[] = [];
-          const nullMap = buf
-            .readUIntLE(Math.floor((headerInfo.length + 7 + 2) / 8), 1)
-            .toString(2)
-            .split("")
-            .map(bit => Number(bit))
-            .reverse();
-          headerInfo.forEach(({ type }, i) => rowData.push(nullMap[i + 2] ? null : this.readValue(type, buf)));
-          data.push(rowData);
+          const buf = new MysqlBuf(lastBuffer ? Buffer.concat([lastBuffer, buffer]) : buffer);
+          lastBuffer = undefined;
+
+          /** 如果存在可写流 */
+          if (recvStreamLen && recvStream) {
+            const subBuffer = buf.read(recvStreamLen);
+            recvStreamLen -= subBuffer.length;
+            if (!recvStream.write(subBuffer) && recvStreamLen > 0) {
+              // console.log("等待写入流，剩余", recvStreamLen);
+              await new Promise(r => recvStream?.once("drain", () => r(0)));
+            }
+            if (recvStreamLen <= 0) {
+              /** 读完了，关闭可写流 */
+              recvStream.end();
+              recvStream = undefined;
+              recvStreamLen = 0;
+              /** 跳过当前单元格 */
+              fieldIndex++;
+            } else {
+              /** 还没读完的话，等下一个MySQL包 */
+              continue;
+            }
+          }
+          if (fieldIndex === headerInfo.length) {
+            /** 新的一条记录 */
+            buf.offset++;
+            data[++recordIndex] = [];
+            /** 计算空位图 */
+
+            /** 剩余列数 */
+            let surplusHeaderLength = headerInfo.length;
+            for (let nullMapIndex = 0; nullMapIndex < Math.floor((headerInfo.length + 7 + 2) / 8); nullMapIndex++) {
+              const flag = buf.readUIntLE(1);
+              for (let i = nullMapIndex ? 0 : 2; i < 8 && surplusHeaderLength--; i++) {
+                data[recordIndex].push((flag >> i) & 1 ? null : undefined);
+              }
+            }
+            /** 计算空位图END */
+            fieldIndex = 0;
+          }
+          /** 读取剩余的单元格 */
+          for (; fieldIndex < headerInfo.length; fieldIndex++) {
+            /** 标记当前单元格开始的指针 */
+            const { offset } = buf;
+            /** 当前单元格值的长度 */
+            let len: number | undefined;
+            if (data[recordIndex][fieldIndex] !== undefined) {
+              /** 如果不是undefined，说明已经有值了，或者是null */
+              continue;
+            }
+
+            if (
+              onLongData &&
+              headerInfo[fieldIndex].noFixedLength &&
+              /** 如果开发者通过onLongData回调返回可写流，这个单元格的值就流向这个可写流 */
+              (recvStream =
+                onLongData((len = buf.readIntLenenc()), headerInfo[fieldIndex], recordIndex, { headerInfo, data }) ||
+                undefined)
+            ) {
+              data[recordIndex][fieldIndex] = `[${EMysqlFieldType[headerInfo[fieldIndex].type]}] length:${len}`;
+              buffer = buf.read(len);
+              recvStreamLen = len - buffer.length;
+              recvStream.write(buffer);
+              if (recvStreamLen > 0) {
+                /** 如果一个MySQL包不能满足 */
+                break;
+              } else {
+                /** 关闭这个可写流 */
+                recvStream.end();
+                recvStream = undefined;
+                recvStreamLen = 0;
+                continue;
+              }
+            }
+
+            data[recordIndex][fieldIndex] = this.readValue(headerInfo[fieldIndex].type, buf, len);
+            len = undefined;
+            if (data[recordIndex][fieldIndex] === undefined) {
+              // console.log("残余");
+              lastBuffer = buf.buffer.subarray(offset);
+              break;
+            }
+          }
         }
       }
       this.task = undefined;
@@ -681,90 +832,103 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       });
       this.tryToConsume();
     });
-  public queryRaw = (task: IMysqltask): void => {
+  public queryRaw = (task: IMysqltask) => {
     this.taskQueue.push(task);
+    return this;
   };
 }
 
 // 测试用例
-// (async () => {
-//   const mysql = new Mysql({
-//     host: "127.0.0.1",
-//     port: 3306,
-//     user: "root",
-//     password: "root123",
-//     database: "information_schema",
-//   });
-//   mysql.on("handshake", handshake => {
-//     console.log("handshake");
-//   });
-//   mysql.once("loginError", (a, b) => {
-//     console.log(a, b);
-//     mysql.reliableSocket.close();
-//   });
-//   mysql.on("connected", () => {
-//     console.log("connected");
-//   });
-//   mysql.on("prepare", (...a) => {
-//     console.log("prepare", ...a);
-//   });
-// mysql
-//   .query("SELECT * FROM inf.`testnull`", [])
-//   .then(a => {
-//     console.log(a);
-//   })
-//   .catch(e => {
-//     console.log("报错了");
-//     console.error(e);
-//   });
-// mysql
-//   .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
-//   .then(a => {
-//     console.log(a);
-//   })
-//   .catch(e => {
-//     console.log("报错了");
-//     console.error(e);
-//   });
-// mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
-// mysql.queryRaw({
-//   sql: "SELECT * FROM INFO.student LIMIT ?",
-//   params: [10],
-//   callback(err, data) {
-//     console.log(data);
-//   },
-// });
+(async () => {
+  const mysql = new Mysql({
+    host: "127.0.0.1",
+    port: 3306,
+    user: "root",
+    password: "root123",
+    database: "information_schema",
+    convertToTimestamp: true,
+  });
+  mysql.on("handshake", handshake => {
+    console.log("handshake");
+  });
+  mysql.once("loginError", (a, b) => {
+    console.log(a, b);
+    mysql.reliableSocket.close();
+  });
+  mysql.on("connected", () => {
+    console.log("connected");
+  });
+  mysql.on("prepare", (...a) => {
+    console.log("prepare", ...a);
+  });
+  // mysql
+  //   .query("SELECT * FROM inf.`testnull`", [])
+  //   .then(a => {
+  //     console.log(a);
+  //   })
+  //   .catch(e => {
+  //     console.log("报错了");
+  //     console.error(e);
+  //   });
+  // mysql
+  //   .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
+  //   .then(a => {
+  //     console.log(a);
+  //   })
+  //   .catch(e => {
+  //     console.log("报错了");
+  //     console.error(e);
+  //   });
+  // mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
+  // mysql.queryRaw({
+  //   sql: "SELECT * FROM INFO.student LIMIT ?",
+  //   params: [10],
+  //   callback(err, data) {
+  //     console.log(data);
+  //   },
+  // });
 
-// const ignoreDB = ["information_schema", "mysql", "performance_schema"];
-// mysql
-//   .query(
-//     `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
-//       .map(_ => "?")
-//       .join(",")});`,
-//     ignoreDB
-//   )
-//   .then(console.log);
-// const a = await mysql.query(
-//   `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
-//   []
-// );
+  // const ignoreDB = ["information_schema", "mysql", "performance_schema"];
+  // mysql
+  //   .query(
+  //     `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
+  //       .map(_ => "?")
+  //       .join(",")});`,
+  //     ignoreDB
+  //   )
+  //   .then(console.log);
+  // const a = await mysql.query(
+  //   `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
+  //   []
+  // );
 
-// console.log(a);
-// const [result1, result2] = await Promise.all([
-//   mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
+  // console.log(a);
+  // const [result1, result2] = await Promise.all([
+  //   mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
 
-//   mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
-//     "2022-02-14 15:33:39",
-//     172017001,
-//   ]),
-// ]);
-// console.log("result1:", result1);
-// console.log("result2:", result2);
-// const s = require("fs").createReadStream("d:/t.bin", { end: 320 * 1024 * 1024 });
-// setTimeout(async () => {
-//   console.log(
-//     await mysql.query("UPDATE info.`student` SET `bo` = ? WHERE `student`.`studentId` = ?", [s, "172017002"])
-//   );
-// }, 1000);
-//   console.log(await mysql.query(`SELECT * FROM info.student LIMIT 10`, []));
-// })();
+  //   mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
+  //     "2022-02-14 15:33:39",
+  //     172017001,
+  //   ]),
+  // ]);
+  // console.log("result1:", result1);
+  // console.log("result2:", result2);
+  // const s = require("fs").createReadStream("d:/t.bin", { end: 320 * 1024 * 1024 - 1 });
+  // setTimeout(async () => {
+  //   console.log(
+  //     await mysql.query("UPDATE info.`student` SET `bo` = ? WHERE `student`.`studentId` = ?", [s, "172017002"])
+  //   );
+  // }, 1000);
+  const a = mysql.queryRaw({
+    sql: `SELECT * FROM info.student LIMIT 10`,
+    params: [],
+    onLongData(len, info, index, { data }) {
+      if (info.name === "bo") {
+        return require("fs").createWriteStream("t" + (data[index][2] || index) + ".bin");
+      }
+    },
+    callback(_, d) {
+      d && "data" in d && console.log(a.format(d));
+    },
+  });
+})();
