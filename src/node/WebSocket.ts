@@ -17,6 +17,7 @@ export type IWebSocketEvents = {
   connected: () => void;
   subStream: (subStream: stream.Readable) => void;
   text: (text: string) => void;
+  ping: (buffer: Buffer) => void;
   error: (err: Error) => void;
   close: () => void;
 };
@@ -133,6 +134,10 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
         }
         // console.log("recvLen", recvLen, "recvType", recvType);
         if (!recvLen) {
+          if (recvType === EWebSocketOpcode["ping"]) {
+            this.emit("ping", Buffer.allocUnsafe(0));
+            this.socket.write(Buffer.from([0x8a, 0]));
+          }
           break;
         }
         let recvMaskIndex = 0;
@@ -160,7 +165,7 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
             // console.log("发送", buf.length);
             canReadPush(buf);
             canReadSize = 0;
-          } else if (recvType === 1) {
+          } else if (recvType === EWebSocketOpcode["文本数据帧"]) {
             buffersLen += buf.length;
             buffers.push(buf);
             if (buffersLen > Number(this.opts.maxTextSize)) {
@@ -174,16 +179,21 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
               this.socket.end();
               return;
             }
+          } else if (recvType === EWebSocketOpcode["pong"]) {
+            this.pingCallBacks.get(buf.readUInt32BE())?.();
+          } else if (recvType === EWebSocketOpcode["ping"]) {
+            this.emit("ping", buf);
+            this.socket.write(Buffer.concat([Buffer.from([0x8a, buf.length]), buf]));
           }
         }
         if (recvIsEnd) {
           break;
         }
       }
-      if (recvType === 2 && canReadPush) {
+      if (recvType === EWebSocketOpcode["二进制数据帧"] && canReadPush) {
         canReadPush(null);
         canReadSize = 0;
-      } else if (recvType === 1) {
+      } else if (recvType === EWebSocketOpcode["文本数据帧"]) {
         this.emit("text", String(Buffer.concat(buffers)));
       }
 
@@ -253,6 +263,32 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
       }
     }
   }
+  public ping = (timeout: number = 5000) =>
+    new Promise((resolve, reject) => {
+      let rand = 0;
+      do {
+        rand = ((Math.random() * 1e11) | 0) - (1 << 31);
+      } while (this.pingCallBacks.has(rand));
+      const timer = setTimeout(() => {
+        if (this.pingCallBacks.has(rand)) {
+          this.pingCallBacks.delete(rand);
+          reject(new Error("timeout:" + timeout + "ms"));
+          return;
+        }
+      }, timeout);
+      this.pingCallBacks.set(rand, () => {
+        clearTimeout(timer);
+        this.pingCallBacks.delete(rand);
+        resolve(new Date().getTime() - time);
+      });
+      const buf = new Buf();
+      buf.writeUIntBE(0x89, 1);
+      buf.writeUIntBE(4, 1);
+      buf.writeUIntBE(rand, 4);
+      this.socket.write(buf.buffer);
+      const time = new Date().getTime();
+    });
+  private pingCallBacks: Map<number, () => void> = new Map();
 }
 
 // 测试用例
@@ -269,8 +305,12 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
 //       })
 //       .on("connected", () => {
 //         t.send(require("fs").createReadStream("ttt.bin"));
-//         //t.send("1234567890".repeat(1024 * 10));
+//         // t.send("1234567890".repeat(1024 * 10));
+//         // setTimeout(() => {
+//         //t.ping().then(delay => console.log("与客户端延迟：", delay, "ms"));
+//         // }, 500);
 //       })
+//       .on("ping", buf => console.log("ping", buf))
 //       .on("error", e => {
 //         console.log(e);
 //       });
