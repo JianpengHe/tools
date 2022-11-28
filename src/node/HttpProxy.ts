@@ -139,7 +139,7 @@ export class HttpProxy {
         undefined;
 
       /** 如果域名在hosts列表中，才交给开发者处理 */
-      if (this.hosts.includes(url.host)) {
+      if (this.hosts.includes(url.hostname)) {
         for (const [regFn, fn] of this.routeMap) {
           /**看满足哪条“代理规则” */
           if (regFn(httpProxyReq.method, url, httpProxyReq.headers)) {
@@ -248,11 +248,25 @@ export class HttpProxy {
     opt.showProcessName = opt?.showProcessName ?? true;
     this.opt = opt;
     this.proxyServer.once("error", console.error);
-    Promise.all(hosts.map(host => dns.promises.resolve(host))).then(ips => {
+    Promise.all(
+      hosts.map(
+        host =>
+          new Promise(resolve =>
+            dns.resolve(host, (err, addresses) => {
+              if (err || !addresses) {
+                console.warn("\x1B[33m找不到", host, "的DNS记录，已解析到本地:127.0.0.1\x1B[0m");
+                resolve(["127.0.0.1"]);
+                return;
+              }
+              resolve(addresses);
+            })
+          ) as Promise<string[]>
+      )
+    ).then(ips => {
       console.log("需要代理的域名对应的ip");
       ips.forEach((ip, i) => {
         if (ip && ip[0]) {
-          if (ip[0] === opt.proxyBindIp) {
+          if (this.opt.runWith !== "httpProxy" && ip[0] === opt.proxyBindIp) {
             console.log("域名", this.hosts[i], "的IP地址不能与代理地址相同");
             throw new TypeError("请关闭其他正在运行的HttpProxy或DnsServer");
           }
