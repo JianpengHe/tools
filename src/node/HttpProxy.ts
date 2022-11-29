@@ -23,7 +23,7 @@ export type IHttpProxyRes = {
 };
 export type IHttpProxyFn = (
   localReq: IHttpProxyReq
-) => AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes>;
+) => AsyncGenerator<Partial<IHttpProxyReq> | null | undefined, Partial<IHttpProxyRes> | undefined, IHttpProxyRes>;
 export type IHttpProxyRegFn = (method: string, url: URL, headers: http.IncomingHttpHeaders) => boolean;
 
 export type IHttpProxyOpt = {
@@ -135,8 +135,7 @@ export class HttpProxy {
       };
 
       /** 开发者修改请求的函数 */
-      let httpProxyFn: AsyncGenerator<Partial<IHttpProxyReq>, Partial<IHttpProxyRes>, IHttpProxyRes> | undefined =
-        undefined;
+      let httpProxyFn: ReturnType<IHttpProxyFn> | undefined = undefined;
 
       /** 如果域名在hosts列表中，才交给开发者处理 */
       if (this.hosts.includes(url.hostname)) {
@@ -161,9 +160,26 @@ export class HttpProxy {
 
       /** 如果存在这个“开发者修改请求的函数”，说明开发者需要修改了 */
       if (httpProxyFn) {
-        Object.entries((await httpProxyFn.next()).value).forEach(([key, value]) => {
-          httpProxyReq[key] = value;
-        });
+        const { value } = await httpProxyFn.next();
+        if (value !== null) {
+          Object.entries(value || {}).forEach(([key, value]) => {
+            httpProxyReq[key] = value;
+          });
+        } else {
+          // console.log("不对外发请求");
+          const httpProxyRes: IHttpProxyRes = {
+            code: 200,
+            headers: {},
+            body: "",
+          };
+          /** 混合用户修改过的 */
+          Object.entries((await httpProxyFn.next(httpProxyRes)).value || {}).forEach(([key, value]) => {
+            httpProxyRes[key] = value;
+          });
+          res.writeHead(httpProxyRes.code, httpProxyRes.headers);
+          res.end(httpProxyRes.body);
+          return;
+        }
       }
 
       const remoteReq = (url.protocol === "https:" ? https : http).request(
@@ -199,7 +215,7 @@ export class HttpProxy {
             }
             delete httpProxyRes.headers["content-length"];
             /** 混合用户修改过的 */
-            Object.entries((await httpProxyFn.next(httpProxyRes)).value).forEach(([key, value]) => {
+            Object.entries((await httpProxyFn.next(httpProxyRes)).value || {}).forEach(([key, value]) => {
               httpProxyRes[key] = value;
             });
             res.writeHead(httpProxyRes.code, httpProxyRes.headers);
@@ -213,6 +229,8 @@ export class HttpProxy {
       );
       remoteReq.once("error", () => {
         console.log("\x1B[31mError\t", req.method, "\t", url.host, "\x1B[0m");
+        res.statusCode = 500;
+        res.end("Proxy Error: Unable connect to server");
       });
       if (httpProxyFn) {
         remoteReq.end(httpProxyReq.body);
@@ -372,6 +390,7 @@ export class HttpProxy {
   }
 }
 
+// 测试用例
 // new HttpProxy(["www.baidu.com"], {
 //   //runWith: "dns",
 // }).addProxyRule(
@@ -388,5 +407,26 @@ export class HttpProxy {
 //     console.log(String(remoteRes.body));
 //     const localRes: Partial<IHttpProxyRes> = { body: "禁止访问百度" };
 //     return localRes;
+//   }
+// );
+
+// new HttpProxy(["www.baidu.com"], {
+//   //runWith: "dns",
+// }).addProxyRule(
+//   (method, url, headers) => true,
+
+//   async function* (localReq) {
+//     if (localReq.url.pathname === "/") {
+//       // 不对外发请求
+//       yield null;
+//     } else {
+//       // 不修改req
+//       yield;
+//     }
+//     return localReq.url.pathname === "/"
+//       ? // 修改为test
+//         { body: "test" }
+//       : // 不修改res
+//         undefined;
 //   }
 // );
