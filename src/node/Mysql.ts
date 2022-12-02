@@ -518,7 +518,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       try {
         prepare = await this.getPrepare(sql);
       } catch (e: any) {
-        callback(Error(String(e?.message ?? e)));
+        callback(new Error(String(e?.message ?? e)));
         this.task = undefined;
         this.tryToConsume(times);
         return;
@@ -834,6 +834,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     });
   public queryRaw = (task: IMysqltask) => {
     this.taskQueue.push(task);
+    this.tryToConsume();
     return this;
   };
 }
