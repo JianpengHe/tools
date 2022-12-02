@@ -223,6 +223,7 @@ export type IMysqlEvents = {
 export class Mysql extends TypedEventEmitter<IMysqlEvents> {
   public reliableSocket: ReliableSocket;
   public readSocket?: RecvStream;
+  public dbName: string = "";
   private socket?: net.Socket;
   private connectInfo: IMysqlConnect;
   private prepareMap: Map<string, IMysqlPrepareResult> = new Map();
@@ -342,6 +343,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         }
         return;
       }
+      this.dbName = this.connectInfo.database || "";
       this.connected = true;
       this.emit("connected");
       this.tryToConsume();
@@ -513,7 +515,10 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       return;
     }
     const { sql, params, callback, onLongData } = this.task;
-    let prepare = this.prepareMap.get(sql);
+    const selectDbName = sql === "USE" ? String(params[0]) : false;
+    let prepare = selectDbName
+      ? { statementId: 0, columnsNum: 0, paramsNum: 1, warningCount: 0 }
+      : this.prepareMap.get(sql);
     if (!prepare) {
       try {
         prepare = await this.getPrepare(sql);
@@ -537,19 +542,25 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       return;
     }
     const buf = new Buf();
-    buf.writeUIntLE(0x17);
-    buf.writeUIntLE(prepare.statementId, 4);
-    buf.writeUIntLE(0); // 0x00: CURSOR_TYPE_NO_CURSOR、0x01: CURSOR_TYPE_READ_ONLY、0x02: CURSOR_TYPE_FOR_UPDATE、0x04: CURSOR_TYPE_SCROLLABLE
-    buf.writeUIntLE(1, 4);
-    buf.writeUIntLE(
-      Number(
-        params.reduce(
-          (previousValue, currentValue, index) => Number(previousValue) + (currentValue === null ? 1 << index : 0),
-          0
+    if (selectDbName) {
+      buf.writeUIntLE(2);
+      buf.writeStringPrefix(selectDbName, () => undefined);
+      params.length = 0;
+    } else {
+      buf.writeUIntLE(0x17);
+      buf.writeUIntLE(prepare.statementId, 4);
+      buf.writeUIntLE(0); // 0x00: CURSOR_TYPE_NO_CURSOR、0x01: CURSOR_TYPE_READ_ONLY、0x02: CURSOR_TYPE_FOR_UPDATE、0x04: CURSOR_TYPE_SCROLLABLE
+      buf.writeUIntLE(1, 4);
+      buf.writeUIntLE(
+        Number(
+          params.reduce(
+            (previousValue, currentValue, index) => Number(previousValue) + (currentValue === null ? 1 << index : 0),
+            0
+          )
         )
-      )
-    );
-    buf.writeUIntLE(1);
+      );
+      buf.writeUIntLE(1);
+    }
     const dataBuf = new MysqlBuf();
 
     this.reliableSocket.getSocket(async sock => {
@@ -642,6 +653,9 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         /** 无结果集 */
         if (prepare?.columnsNum === 0) {
           const buf = new MysqlBuf(buffer);
+          if (selectDbName) {
+            this.dbName = selectDbName;
+          }
           callback(null, {
             affectedRows: buf.readIntLenenc(1),
             lastInsertId: buf.readIntLenenc(),
@@ -837,6 +851,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     this.tryToConsume();
     return this;
   };
+  public selectDb = (dbName: string) => this.query("USE", [dbName]) as Promise<IMysqlResult>;
 }
 
 // 测试用例
@@ -862,65 +877,68 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
 //   mysql.on("prepare", (...a) => {
 //     console.log("prepare", ...a);
 //   });
-// mysql
-//   .query("SELECT * FROM inf.`testnull`", [])
-//   .then(a => {
+//   mysql.selectDb("info").then(a => {
 //     console.log(a);
-//   })
-//   .catch(e => {
-//     console.log("报错了");
-//     console.error(e);
 //   });
-// mysql
-//   .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
-//   .then(a => {
-//     console.log(a);
-//   })
-//   .catch(e => {
-//     console.log("报错了");
-//     console.error(e);
+//   mysql
+//     .query("SELECT * FROM `testnull`", [])
+//     .then(a => {
+//       console.log(a);
+//     })
+//     .catch(e => {
+//       console.log("报错了");
+//       console.error(e);
+//     });
+//   mysql
+//     .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
+//     .then(a => {
+//       console.log(a);
+//     })
+//     .catch(e => {
+//       console.log("报错了");
+//       console.error(e);
+//     });
+//   mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
+//   mysql.queryRaw({
+//     sql: "SELECT * FROM INFO.student LIMIT ?",
+//     params: [10],
+//     callback(err, data) {
+//       console.log(data);
+//     },
 //   });
-// mysql.query("DELETE FROM score.`2020` WHERE `studentId`=1 and score=1", []).then(console.log);
-// mysql.queryRaw({
-//   sql: "SELECT * FROM INFO.student LIMIT ?",
-//   params: [10],
-//   callback(err, data) {
-//     console.log(data);
-//   },
-// });
 
-// const ignoreDB = ["information_schema", "mysql", "performance_schema"];
-// mysql
-//   .query(
-//     `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
-//       .map(_ => "?")
-//       .join(",")});`,
-//     ignoreDB
-//   )
-//   .then(console.log);
-// const a = await mysql.query(
-//   `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
-//   []
-// );
-
-// console.log(a);
-// const [result1, result2] = await Promise.all([
-//   mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
-
-//   mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
-//     "2022-02-14 15:33:39",
-//     172017001,
-//   ]),
-// ]);
-// console.log("result1:", result1);
-// console.log("result2:", result2);
-// const s = require("fs").createReadStream("d:/t.bin", { end: 320 * 1024 * 1024 - 1 });
-// setTimeout(async () => {
-//   console.log(
-//     await mysql.query("UPDATE info.`student` SET `bo` = ? WHERE `student`.`studentId` = ?", [s, "172017002"])
+//   const ignoreDB = ["information_schema", "mysql", "performance_schema"];
+//   mysql
+//     .query(
+//       `SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,IS_NULLABLE,DATA_TYPE,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE table_schema not in(${ignoreDB
+//         .map(_ => "?")
+//         .join(",")});`,
+//       ignoreDB
+//     )
+//     .then(console.log);
+//   const a = await mysql.query(
+//     `SELECT * FROM info.student a INNER JOIN info.student b on a.studentId=b.studentId LIMIT 10`,
+//     []
 //   );
-// }, 1000);
-//   const a = mysql.queryRaw({
+
+//   console.log(a);
+//   const [result1, result2] = await Promise.all([
+//     mysql.query(`SELECT * FROM INFO.student LIMIT ?`, [500]),
+
+//     mysql.query("UPDATE info.`student` SET `createTime` = ? WHERE `student`.`studentId` = ?", [
+//       "2022-02-14 15:33:39",
+//       172017001,
+//     ]),
+//   ]);
+//   console.log("result1:", result1);
+//   console.log("result2:", result2);
+//   const s = require("fs").createReadStream("d:/t.bin", { end: 320 * 1024 * 1024 - 1 });
+//   setTimeout(async () => {
+//     console.log(
+//       await mysql.query("UPDATE info.`student` SET `bo` = ? WHERE `student`.`studentId` = ?", [s, "172017002"])
+//     );
+//   }, 1000);
+//   const a2 = mysql.queryRaw({
 //     sql: `SELECT * FROM info.student LIMIT 10`,
 //     params: [],
 //     onLongData(len, info, index, { data }) {
@@ -929,7 +947,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
 //       }
 //     },
 //     callback(_, d) {
-//       d && "data" in d && console.log(a.format(d));
+//       d && "data" in d && console.log(a2.format(d));
 //     },
 //   });
 // })();
