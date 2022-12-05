@@ -515,10 +515,11 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       return;
     }
     const { sql, params, callback, onLongData } = this.task;
+    const prepareMapKey = `use ${this.dbName}; ${sql}`;
     const selectDbName = sql === "USE" ? String(params[0]) : false;
     let prepare = selectDbName
       ? { statementId: 0, columnsNum: 0, paramsNum: 1, warningCount: 0 }
-      : this.prepareMap.get(sql);
+      : this.prepareMap.get(prepareMapKey);
     if (!prepare) {
       try {
         prepare = await this.getPrepare(sql);
@@ -528,7 +529,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         this.tryToConsume(times);
         return;
       }
-      this.prepareMap.set(sql, prepare);
+      this.prepareMap.set(prepareMapKey, prepare);
     }
     // console.log("pid", prepare, sql, params);
     if (prepare.paramsNum !== params.length) {
