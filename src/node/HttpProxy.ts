@@ -362,10 +362,12 @@ export class HttpProxy {
         const connectionListener = (sock: net.Socket) => {
           sock.once("readable", () => {
             /** 当有数据时，不消费readable流中的数据，直接读取缓存到的数据判断http还是https请求 */
-            (sock["_" + "readableState"].buffer?.head?.data[0] === 0x16 ? tlsServer : this.proxyServer).emit(
-              "connection",
-              sock
-            );
+            const chunk = sock.read(1);
+            if (!chunk) {
+              return;
+            }
+            sock.unshift(chunk);
+            (chunk[0] === 0x16 ? tlsServer : this.proxyServer).emit("connection", sock);
           });
         };
         /** 需要绑定N个端口，就创建N个tcp服务器 */
