@@ -14,8 +14,10 @@ const PATH = "release";
     for (const file of await fs.promises.readdir("src" + path, { withFileTypes: true })) {
       if (file.isDirectory()) {
         await fs.promises.mkdir(PATH + path + "/" + file.name);
-        return await readFile(path + "/" + file.name);
+        await readFile(path + "/" + file.name);
+        continue;
       }
+      
       if (!/\.ts$/.test(file.name)) {
         continue;
       }
