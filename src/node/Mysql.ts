@@ -1,4 +1,4 @@
-import { Buf } from "./Buf";
+import { Buf, getNumberLen } from "./Buf";
 import * as net from "net";
 import * as crypto from "crypto";
 import * as stream from "stream";
@@ -573,15 +573,10 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       for (let index = 0; index < params.length; index++) {
         let param = params[index];
         if (typeof param === "number") {
-          let len = 1;
-          while (len < 8 && 2 ** (len * 8) <= param) {
-            len *= 2;
-          }
-          if (len <= 8) {
-            buf.writeUIntLE(len === 4 ? 3 : len, 2);
-            dataBuf.writeUIntLE(param, len);
-            continue;
-          }
+          const len = getNumberLen(param, false, true);
+          buf.writeUIntLE(len === 4 ? 3 : len, 2);
+          dataBuf.writeIntLE(param, len);
+          continue;
         } else if (typeof param === "object") {
           if (param instanceof Buffer) {
             buf.writeUIntLE(0xfb, 2);
@@ -891,7 +886,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
 //       console.error(e);
 //     });
 //   mysql
-//     .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [null, 1])
+//     .query("UPDATE info.`testnull` SET `2` = ? WHERE `testnull`.`id` = ?", [-65537 * 300, 1])
 //     .then(a => {
 //       console.log(a);
 //     })

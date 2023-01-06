@@ -1,3 +1,31 @@
+export const getNumberLen = (
+  /** 数字 */
+  num = 0,
+  /** 是否是无符号 */
+  isUnsigned = true,
+  /** 是否使用阶乘递增（1,2,3,4,5...）或（1,2,4,8,16...） */
+  isPower = false
+) => {
+  let times = 1;
+  let bit = isUnsigned ? 256 : 128;
+  if (num < 0) {
+    num *= -1;
+    num -= 1;
+  }
+  while (1) {
+    if (num < bit) {
+      return times;
+    }
+    if (isPower) {
+      times *= 2;
+    } else {
+      times++;
+    }
+    num /= 256;
+  }
+  return Infinity;
+};
+
 export class Buf {
   public lastReadValue: any;
   public offset: number;
@@ -7,28 +35,44 @@ export class Buf {
     this.offset = offset ?? 0;
   }
   public UIntLEToBuffer(number: number, byteLength?: number) {
-    const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
-    if (!number) {
-      return buf.subarray(0, byteLength ?? 1).fill(number);
+    byteLength = byteLength || getNumberLen(number, true);
+    const buf = Buffer.alloc(byteLength);
+    if (byteLength === 8) {
+      buf.writeBigUInt64LE(BigInt(number));
+    } else {
+      buf.writeUintLE(number, 0, byteLength);
     }
-    let index = 0;
-    while (number > 0) {
-      buf[index++] = number % 256;
-      number = Math.floor(number / 256);
-    }
-    return byteLength ? buf : buf.subarray(0, index);
+    return buf;
   }
   public UIntBEToBuffer(number: number, byteLength?: number) {
-    const buf = byteLength ? Buffer.alloc(byteLength) : Buffer.allocUnsafe(16);
-    if (!number) {
-      return buf.subarray(0, byteLength ?? 1).fill(number);
+    byteLength = byteLength || getNumberLen(number, true);
+    const buf = Buffer.alloc(byteLength);
+    if (byteLength === 8) {
+      buf.writeBigUInt64BE(BigInt(number));
+    } else {
+      buf.writeUintBE(number, 0, byteLength);
     }
-    let index = buf.length;
-    while (number > 0) {
-      buf[--index] = number % 256;
-      number = Math.floor(number / 256);
+    return buf;
+  }
+  public IntLEToBuffer(number: number, byteLength?: number) {
+    byteLength = byteLength || getNumberLen(number, false);
+    const buf = Buffer.alloc(byteLength);
+    if (byteLength === 8) {
+      buf.writeBigInt64LE(BigInt(number));
+    } else {
+      buf.writeIntLE(number, 0, byteLength);
     }
-    return byteLength ? buf : buf.subarray(index);
+    return buf;
+  }
+  public IntBEToBuffer(number: number, byteLength?: number) {
+    byteLength = byteLength || getNumberLen(number, false);
+    const buf = Buffer.alloc(byteLength);
+    if (byteLength === 8) {
+      buf.writeBigInt64BE(BigInt(number));
+    } else {
+      buf.writeIntBE(number, 0, byteLength);
+    }
+    return buf;
   }
   public alloc(length: number, fill?: number) {
     const buf = Buffer.allocUnsafe(length);
@@ -110,6 +154,12 @@ export class Buf {
   }
   public writeUIntLE(number: number, byteLength?: number, offset?: number) {
     return this.write(this.UIntLEToBuffer(number, byteLength), offset);
+  }
+  public writeIntBE(number: number, byteLength?: number, offset?: number) {
+    return this.write(this.IntBEToBuffer(number, byteLength), offset);
+  }
+  public writeIntLE(number: number, byteLength?: number, offset?: number) {
+    return this.write(this.IntLEToBuffer(number, byteLength), offset);
   }
   public writeStringNUL(str: string | Buffer, offset?: number) {
     return this.write(Buffer.concat([Buffer.from(str), this.UIntBEToBuffer(0)]), offset);
