@@ -558,7 +558,8 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
             (previousValue, currentValue, index) => Number(previousValue) + (currentValue === null ? 1 << index : 0),
             0
           )
-        )
+        ),
+        ((params.length + 7) / 8) | 0
       );
       buf.writeUIntLE(1);
     }
