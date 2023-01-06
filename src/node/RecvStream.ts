@@ -144,7 +144,6 @@ export class RecvStream {
   constructor(sourceStream: IReadStream) {
     this.sourceStream = sourceStream;
     sourceStream.pause();
-    sourceStream["t"] = this;
   }
 
   /** readBuffer的“同步”写法 */
