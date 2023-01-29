@@ -23,11 +23,9 @@ export type IProxyWinOpt = {
 };
 
 /** 查看/设置HTTP代理 */
-export const setProxyWin = async (newOpt?: IProxyWinOpt) => {
-  if (os.platform() !== "win32") {
-    throw new Error("Microsoft Windows Only!");
-  }
-  const status = {
+export class ProxyWin {
+  private readonly regPath = `"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections" /v DefaultConnectionSettings`;
+  private readonly status = {
     0x0f: "全部开启",
     0x01: "全部禁用",
     0x03: "使用代理服务器",
@@ -37,75 +35,114 @@ export const setProxyWin = async (newOpt?: IProxyWinOpt) => {
     0x0b: "打开自动检测并使用代理",
     0x0d: "打开自动检测并使用脚本",
   };
-  const regPath = `"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections" /v DefaultConnectionSettings`;
-  if (!newOpt) {
-    const output: Required<IProxyWinOpt> = await new Promise((resolve, reject) => {
-      child_process.exec(`REG QUERY ${regPath}`, (err, data) => {
+  private autoReset = false;
+  private afterExitBuf?: Buffer;
+
+  private getProxyBuf(): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      child_process.exec(`REG QUERY ${this.regPath}`, (err, data) => {
         if (!err && data) {
-          const buf = new Buf(
+          resolve(
             Buffer.from(
               (String(data)
                 .trim()
-                .match(/REG_BINARY\s+([\dA-F]+)$/) || [])[1],
+                .match(/REG_BINARY\s+([\dA-F]+)$/) || [])[1] || "",
               "hex"
             )
           );
-          if (buf.readUIntLE(4) !== 0x46) {
-            reject(new Error("解析失败"));
-            return;
-          }
-          resolve({
-            times: buf.readUIntLE(4),
-            status: status[buf.readUIntLE(4)],
-            proxyIp: buf.readString(buf.readUIntLE(4)),
-            noProxyIps: buf.readString(buf.readUIntLE(4)),
-            pac: buf.readString(buf.readUIntLE(4)),
-          });
         } else {
           reject(err || new Error("no data"));
         }
       });
     });
-    return output;
   }
-  const buf = new Buf();
-  buf.writeUIntLE(0x46, 4);
-  buf.writeUIntLE(newOpt.times ?? 0, 4);
-  buf.writeUIntLE(Number((Object.entries(status).find(([_, value]) => value === newOpt?.status) || [])[0] || 1), 4);
-  buf.writeStringPrefix(newOpt.proxyIp ?? "127.0.0.1:1080", len => {
-    buf.writeUIntLE(len, 4);
-    return undefined;
-  });
-  buf.writeStringPrefix(newOpt.noProxyIps ?? "127.0.0.1;<local>", len => {
-    buf.writeUIntLE(len, 4);
-    return undefined;
-  });
-  buf.writeStringPrefix(newOpt.pac ?? "", len => {
-    buf.writeUIntLE(len, 4);
-    return undefined;
-  });
-  buf.write(Buffer.alloc(32));
-  await new Promise((resolve, reject) => {
-    child_process.exec(`REG add ${regPath} /f /t REG_BINARY /d "${buf.buffer.toString("hex")}"`, (err, data) => {
-      if (err || !data) {
-        reject(err || new Error("no data"));
-      } else {
-        resolve(true);
-      }
+
+  private setProxyBuf(buffer: Buffer): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      child_process.exec(`REG add ${this.regPath} /f /t REG_BINARY /d "${buffer.toString("hex")}"`, (err, data) => {
+        if (err || !data) {
+          reject(err || new Error("no data"));
+        } else {
+          resolve(true);
+        }
+      });
     });
-  });
-  const output: Required<IProxyWinOpt> = await setProxyWin();
-  return output;
-};
+  }
+
+  private parse(buffer: Buffer) {
+    const buf = new Buf(buffer);
+    if (buf.readUIntLE(4) !== 0x46) {
+      throw new Error("解析失败");
+    }
+    const out: Required<IProxyWinOpt> = {
+      times: buf.readUIntLE(4),
+      status: this.status[buf.readUIntLE(4)],
+      proxyIp: buf.readString(buf.readUIntLE(4)),
+      noProxyIps: buf.readString(buf.readUIntLE(4)),
+      pac: buf.readString(buf.readUIntLE(4)),
+    };
+    return out;
+  }
+
+  private stringify(newOpt: IProxyWinOpt) {
+    const buf = new Buf();
+    buf.writeUIntLE(0x46, 4);
+    buf.writeUIntLE(newOpt.times ?? 0, 4);
+    buf.writeUIntLE(
+      Number((Object.entries(this.status).find(([_, value]) => value === newOpt?.status) || [])[0] || 1),
+      4
+    );
+    buf.writeStringPrefix(newOpt.proxyIp ?? "127.0.0.1:1080", len => {
+      buf.writeUIntLE(len, 4);
+      return undefined;
+    });
+    buf.writeStringPrefix(newOpt.noProxyIps ?? "127.0.0.1;<local>", len => {
+      buf.writeUIntLE(len, 4);
+      return undefined;
+    });
+    buf.writeStringPrefix(newOpt.pac ?? "", len => {
+      buf.writeUIntLE(len, 4);
+      return undefined;
+    });
+    buf.write(Buffer.alloc(32));
+    return buf.buffer;
+  }
+  constructor(autoReset = false) {
+    if (autoReset) {
+      afterExit(() => {
+        if (this.afterExitBuf) {
+          // this.setProxyBuf(this.afterExitBuf);
+          child_process.execSync(`REG add ${this.regPath} /f /t REG_BINARY /d "${this.afterExitBuf.toString("hex")}"`);
+        }
+      });
+    }
+    this.autoReset = autoReset;
+  }
+
+  public async set(newOpt: IProxyWinOpt) {
+    if (this.autoReset && !this.afterExitBuf) {
+      this.afterExitBuf = await this.getProxyBuf();
+    }
+    await this.setProxyBuf(this.stringify(newOpt));
+    return this;
+  }
+  public async get() {
+    return this.parse(await this.getProxyBuf());
+  }
+}
 
 // (async () => {
+//   const proxyWin = new ProxyWin(true);
+//   console.log(await proxyWin.get());
+//   await new Promise(r => setTimeout(r, 1000));
 //   console.log(
-//     await setProxyWin({
+//     await proxyWin.set({
 //       proxyIp: "127.0.0.1:1080",
 //       status: "使用自动脚本",
 //       pac: "http://127.0.0.1:1080/pg_pac_script_config",
 //     })
 //   );
+//   await new Promise(r => setTimeout(r, 5000));
 // })();
 
 /** 设置DNS服务器 */

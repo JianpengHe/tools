@@ -6,7 +6,7 @@ import * as zlib from "zlib";
 import * as dns from "dns";
 import { DnsServer } from "./DnsServer";
 import { recvAll } from "./utils";
-import { getProcessNameByPort, setProxyWin } from "./systemNetworkSettings";
+import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
 
 /** 使用PG的公共证书签发平台 */
 const certificateCenter = "https://tool.hejianpeng.cn/certificate/";
@@ -320,15 +320,18 @@ export class HttpProxy {
         /** 如果是普通http proxy，则需要监听端口暴露这个代理服务器 */
         this.proxyServer.listen(opt.proxyBindPort, opt.proxyBindIp);
         if (this.opt.autoSettings) {
-          setProxyWin({
-            proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
-            status: "全部开启",
-            pac: `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`,
-          }).then(obj => {
-            console.log("已自动帮您修改系统设置：");
-            console.log("代理服务器", obj.proxyIp);
-            console.log("PAC脚本", obj.pac);
-          });
+          new ProxyWin(true)
+            .set({
+              proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
+              status: "全部开启",
+              pac: `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`,
+            })
+            .then(proxyWin => proxyWin.get())
+            .then(obj => {
+              console.log("已自动帮您修改系统设置：");
+              console.log("代理服务器", obj.proxyIp);
+              console.log("PAC脚本", obj.pac);
+            });
         } else {
           console.log(
             `\x1B[32m*** 若需使用普通代理模式，请进入系统设置代理服务器${opt.proxyBindIp}:${opt.proxyBindPort}\x1B[0m`
