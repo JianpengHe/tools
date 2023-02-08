@@ -147,20 +147,15 @@ export const XML = {
     };
     const stack: IType[] = [out];
     const raw = this.parseRaw(text);
-    const fn = (deep: number, length: number) => {
-      if (!raw[0] || raw[0].path?.length !== length) {
-        return;
-      }
-      const obj = raw.splice(0, 1)[0];
-      const pen = stack[deep];
-      pen.children.push((stack[deep + 2] = { ...obj, content: this.contentToString(obj.contentRaw), children: [] }));
+    let obj: IParseRaw;
+    while ((obj = raw.splice(0, 1)[0])) {
+      const newObj = { ...obj, content: this.contentToString(obj.contentRaw), children: [] };
+      stack[obj.path.length - 1].children.push(newObj);
+      stack.length = obj.path.length;
       if (obj.hasChildren) {
-        /** 因为数组独占一个stack位置，数组的元素也要占一个stack位置 */
-        fn(deep + 2, length + 1);
+        stack[stack.length] = newObj;
       }
-      fn(deep, length);
-    };
-    fn(0, 1);
+    }
     return out.children[0];
   },
   parse(text: string, isArray?: (parseRaw: IParseRaw) => boolean) {
