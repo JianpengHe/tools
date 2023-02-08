@@ -4,6 +4,10 @@ export type IParseRaw = {
   tagName: string;
   attributes: { [x: string]: string };
   hasChildren: boolean;
+  contentRaw: string;
+};
+type IType = IParseRaw & {
+  children: IType[];
   content: string;
 };
 export const XML = {
@@ -53,7 +57,7 @@ export const XML = {
           tagName,
           attributes,
           hasChildren: false,
-          content: "",
+          contentRaw: "",
         });
         stack.pop();
       } else {
@@ -87,7 +91,7 @@ export const XML = {
             tagName,
             attributes,
             hasChildren: false,
-            content,
+            contentRaw: content,
           });
           stack.pop();
         } else {
@@ -100,7 +104,7 @@ export const XML = {
               tagName,
               attributes,
               hasChildren: false,
-              content: data[0],
+              contentRaw: data[0],
             });
             stack.pop();
           } else {
@@ -110,7 +114,7 @@ export const XML = {
               tagName,
               attributes,
               hasChildren: true,
-              content: "",
+              contentRaw: "",
             });
             continue;
           }
@@ -130,6 +134,34 @@ export const XML = {
       throw new Error("失败");
     }
     return out;
+  },
+  parseArray(text: string) {
+    const out: IType = {
+      path: [],
+      tagName: "",
+      attributes: {},
+      children: [],
+      contentRaw: "",
+      content: "",
+      hasChildren: true,
+    };
+    const stack: IType[] = [out];
+    const raw = this.parseRaw(text);
+    const fn = (deep: number, length: number) => {
+      if (!raw[0] || raw[0].path?.length !== length) {
+        return;
+      }
+      const obj = raw.splice(0, 1)[0];
+      const pen = stack[deep];
+      pen.children.push((stack[deep + 2] = { ...obj, content: this.contentToString(obj.contentRaw), children: [] }));
+      if (obj.hasChildren) {
+        /** 因为数组独占一个stack位置，数组的元素也要占一个stack位置 */
+        fn(deep + 2, length + 1);
+      }
+      fn(deep, length);
+    };
+    fn(0, 1);
+    return out.children[0];
   },
   parse(text: string, isArray?: (parseRaw: IParseRaw) => boolean) {
     type IOutput = { [x: string]: IOutput } | Array<IOutput> | string;
@@ -158,7 +190,7 @@ export const XML = {
           fn(deep + 1, length + 1);
         }
       } else {
-        pen[obj.tagName] = this.contentToString(obj.content);
+        pen[obj.tagName] = this.contentToString(obj.contentRaw);
       }
 
       fn(deep, length);
