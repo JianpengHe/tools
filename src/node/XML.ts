@@ -30,7 +30,7 @@ export const XML = {
       const tagName = (match(/^\s*<([^\!\"\#\$\%\&\'\(\)\*\+\,\/\;\<\=\>\?\@\[\\\]\^\`\{\|\}\~\s]+)/) || [])[0];
       if (!tagName) {
         console.log("----------");
-        console.log(stack, txt);
+        console.log(stack, txt.substring(0, 100));
         throw new Error("没开始标签？");
         break;
       }
@@ -118,7 +118,7 @@ export const XML = {
       }
       /** 尝试删除栈中的结束标签 */
       while (stack.length) {
-        if (match(new RegExp(`^<\\/${getTagNameRegExp(stack[stack.length - 1])}>\\s*`))) {
+        if (match(new RegExp(`^\\s*<\\/${getTagNameRegExp(stack[stack.length - 1])}>\\s*`))) {
           stack.pop();
         } else {
           break;
