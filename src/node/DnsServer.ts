@@ -2,7 +2,7 @@ import * as dns from "dns";
 import * as dgram from "dgram";
 import { getOccupiedNetworkPortPids, setDnsAddr } from "./systemNetworkSettings";
 export class DnsServer {
-  public dnsServerIp = (dns.getServers() || [])[0];
+  public dnsServerIp = (dns.getServers() || []).find(ip => /^\d+?\.\d+?\.\d+?\.\d+?/.test(ip));
   public udpServer = dgram.createSocket("udp4");
   public hostsMap: Map<
     string,
@@ -102,6 +102,7 @@ export class DnsServer {
     if (this.dnsServerIp === host) {
       this.dnsServerIp = "119.29.29.29";
     }
+    console.log("DNS Server\t", "请注意使用【管理员权限】打开");
     console.log("DNS Server\t", "远程地址", this.dnsServerIp);
     this.hostsMap = new Map();
     this.udpServerHost = host;
