@@ -236,13 +236,13 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
       task.on("data", chunk => {
         if (!this.socket.write(Buffer.concat([makeHeadBuf(2, chunk.length).buffer, chunk]))) {
           task.pause();
-          this.socket.once("drain", () => {
-            task.resume();
-          });
+          this.socket.once("drain", () => task.resume());
         }
       });
       task.on("end", () => {
         this.socket.write(Buffer.from([128, 0]));
+        this.sendBusy = false;
+        this.tryToCleanQueue();
       });
     } else {
       const isText = !(task instanceof Object);
@@ -254,13 +254,11 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
           buf.buffer[0] += 128;
         }
         if (!this.socket.write(Buffer.concat([buf.buffer, chunk]))) {
-          await new Promise(r => {
-            this.socket.once("drain", () => {
-              r(1);
-            });
-          });
+          await new Promise(resolve => this.socket.once("drain", resolve));
         }
       }
+      this.sendBusy = false;
+      this.tryToCleanQueue();
     }
   }
   public ping = (timeout: number = 5000) =>
