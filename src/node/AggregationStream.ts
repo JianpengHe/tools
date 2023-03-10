@@ -20,7 +20,7 @@ export class AggregationStream extends stream.Readable {
         throw new Error(this.nowIndex + "," + Number(index) + "对不上");
       }
       this.nowIndex++;
-      console.log("index", index);
+      //   console.log("index", index);
       this.push(buf);
       this.canPush = false;
       this.tryToNewThread(threadId || 0);
@@ -30,7 +30,7 @@ export class AggregationStream extends stream.Readable {
     if (this.chuckCount <= 0) {
       this.threadCount--;
       if (this.threadCount <= 0) {
-        console.log("exit");
+        // console.log("exit");
         this.push(null);
       }
       return;
