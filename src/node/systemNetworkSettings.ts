@@ -172,9 +172,11 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
       name =>
         new Promise((resolve, reject) =>
           child_process.exec(
-            `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY & ipconfig/flushdns`,
-            err => {
+            `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY && ipconfig/flushdns`,
+            (err, out) => {
               if (err) {
+                child_process.execFileSync("cmd", [`/C chcp 65001>nul`]);
+                console.log("自动配置DNS\t\x1B[31m" + out.trim() + "\x1B[0m\t", name);
                 reject(err);
                 return;
               }

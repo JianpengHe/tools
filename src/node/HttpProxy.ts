@@ -4,7 +4,7 @@ import * as http from "http";
 import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
-import { DnsServer } from "./DnsServer";
+import { TcpProxy } from "./TcpProxy";
 import { recvAll } from "./utils";
 import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
 
@@ -27,7 +27,8 @@ export type IHttpProxyFn = (
 export type IHttpProxyRegFn = (method: string, url: URL, headers: http.IncomingHttpHeaders) => boolean;
 
 export type IHttpProxyOpt = {
-  runWith?: "httpProxy" | "modifyHostsFile" | "dns";
+  /** 接受DnsServer对象、host文件地址，不传默认httpProxy模式 */
+  proxyMode?: TcpProxy["dnsMode"];
   proxyBindIp?: string; // "127.0.0.1"
   proxyBindPort?: number; // 1080
   listenRequestPorts?: number[]; //[80,443]
@@ -83,7 +84,7 @@ export class HttpProxy {
           this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : ""
         );
         res.end(`function FindProxyForURL(url, host) {
-        if (${this.hosts.map(host => `dnsDomainIs(host, "${host}")`).join("||")}) {
+        if (${this.hosts.map(host => `dnsDomainIs(host, "${host}")`).join("||") || "1"}) {
           return "PROXY ${this.opt.proxyBindIp}:${this.opt.proxyBindPort}; DIRECT";
         } else {
           return "DIRECT";
@@ -251,7 +252,6 @@ export class HttpProxy {
       );
     }
   );
-  private dnsServer?: DnsServer;
   constructor(hosts: string[], opt: IHttpProxyOpt = {}) {
     this.hosts = hosts || [];
     if (!this.hosts.length) {
@@ -261,7 +261,7 @@ export class HttpProxy {
     opt.proxyBindIp = opt?.proxyBindIp || "127.0.0.1";
     opt.proxyBindPort = opt?.proxyBindPort || 1080;
     opt.listenRequestPorts = opt?.listenRequestPorts || [80, 443];
-    opt.runWith = opt?.runWith || "httpProxy";
+    opt.proxyMode = opt?.proxyMode;
     opt.autoSettings = opt?.autoSettings ?? true;
     opt.showProcessName = opt?.showProcessName ?? true;
     this.opt = opt;
@@ -281,10 +281,11 @@ export class HttpProxy {
           ) as Promise<string[]>
       )
     ).then(ips => {
+      const { proxyMode } = opt;
       console.log("需要代理的域名对应的ip");
       ips.forEach((ip, i) => {
         if (ip && ip[0]) {
-          if (this.opt.runWith !== "httpProxy" && ip[0] === opt.proxyBindIp) {
+          if (proxyMode === undefined && ip[0] === opt.proxyBindIp) {
             console.log("域名", this.hosts[i], "的IP地址不能与代理地址相同");
             throw new TypeError("请关闭其他正在运行的HttpProxy或DnsServer");
           }
@@ -296,7 +297,9 @@ export class HttpProxy {
       console.warn(
         `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${certificateCenter}，否则不支持HTTPS\x1B[0m`
       );
-      if (opt.runWith === "httpProxy") {
+
+      if (proxyMode === undefined) {
+        // "httpProxy"
         /** 监听connect方法，一般用做普通代理服务器升级https时，请求建立TLS隧道 */
         this.proxyServer.on("connect", async ({ headers }, socket) => {
           const [host, _] = getHostPort(headers.host);
@@ -374,17 +377,18 @@ export class HttpProxy {
           });
         };
         /** 需要绑定N个端口，就创建N个tcp服务器 */
-        (opt.listenRequestPorts || []).map(port => net.createServer(connectionListener).listen(port));
-        if (opt.runWith === "dns") {
-          /** 直接创建一个代理DNS服务器 */
-          this.dnsServer = new DnsServer(53, opt.proxyBindIp, this.opt.autoSettings);
-          this.hosts.forEach(host => {
-            /** 添加本地DNS服务器的解析规则 */
-            this.dnsServer?.add(opt.proxyBindIp || "", host);
-          });
-        } else if (opt.runWith === "modifyHostsFile") {
-          throw new Error("暂未实现，敬请期待");
-        }
+        const tcpProxy = new TcpProxy(proxyMode);
+        this.hosts.forEach(host => {
+          /** 添加本地DNS服务器的解析规则 */
+          (opt.listenRequestPorts || []).map(port =>
+            tcpProxy.add({
+              host,
+              port,
+              connectionListener,
+              localIPStartPos: 0,
+            })
+          );
+        });
       }
     });
   }
@@ -397,7 +401,7 @@ export class HttpProxy {
 
 // 测试用例
 // new HttpProxy(["www.baidu.com"], {
-//   //runWith: "dns",
+//   proxyMode: new DnsServer(),
 // }).addProxyRule(
 //   (method, url, headers) => {
 //     if (url.pathname.includes("/s")) {
@@ -416,7 +420,7 @@ export class HttpProxy {
 // );
 
 // new HttpProxy(["www.baidu.com"], {
-//   //runWith: "dns",
+//   // proxyMode: "",
 // }).addProxyRule(
 //   (method, url, headers) => true,
 
