@@ -61,7 +61,7 @@ export const createSecureContext = async (host: string): Promise<tls.SecureConte
   });
 export class HttpProxy {
   /** 需要代理哪些域名 */
-  private readonly hosts: string[];
+  private hosts: string[];
   /** 这些域名对应的初始IP */
   private readonly hostsOriginalIpMap: Map<string, string> = new Map();
   /** 唯一标志 */
@@ -163,6 +163,7 @@ export class HttpProxy {
       if (httpProxyFn) {
         const { value } = await httpProxyFn.next();
         if (value !== null) {
+          delete httpProxyReq.headers["if-none-match"];
           Object.entries(value || {}).forEach(([key, value]) => {
             httpProxyReq[key] = value;
           });

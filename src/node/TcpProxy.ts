@@ -1,7 +1,7 @@
 import * as net from "net";
 import * as dns from "dns";
 import * as fs from "fs";
-import { DnsServer } from "./DnsServer";
+import { DnsServer } from "./dnsService";
 import { afterExit } from "./afterExit";
 
 const modifyHostsFile = (hostsFile: string[], host: string, ip: string) => {
