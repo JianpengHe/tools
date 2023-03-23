@@ -169,23 +169,20 @@ export class DnsServer {
       const answer = getRealIpByHost(query.QNAME);
       /** 交由开发者自行处理 */
       const realIp = await this.onDnsLookup(query, answer);
-      console.log(
-        "DNS Server\t" +
-          colorType(query.QTYPE || 0) +
-          "\t" +
-          query.QNAME.padEnd(32, " ") +
-          "\t\x1B[0m→ " +
-          colorType(answer?.TYPE || 0) +
-          "\t" +
-          answer?.RDATA +
-          "\x1B[0m"
-      );
+
       /** 若开发者返回空 */
       if (!realIp) {
         continue;
       }
       if (answer) {
-        answer.RDATA = realIp;
+        if (answer.RDATA !== realIp) {
+          realIps.answers.forEach(ans => {
+            if (ans.NAME === answer.NAME) {
+              ans.TYPE = EDnsResolveType.A;
+              ans.RDATA = realIp;
+            }
+          });
+        }
       } else {
         /** 远端DNS解析失败的域名，直接自定义ip */
         realIps.answers.push({
@@ -197,6 +194,17 @@ export class DnsServer {
           RDATA: realIp,
         });
       }
+      console.log(
+        "DNS Server\t" +
+          colorType(query.QTYPE || 0) +
+          "\t" +
+          query.QNAME.padEnd(32, " ") +
+          "\t\x1B[0m→ " +
+          colorType(answer?.TYPE || 0) +
+          "\t" +
+          answer?.RDATA +
+          "\x1B[0m"
+      );
     }
 
     /** 转一下格式 */

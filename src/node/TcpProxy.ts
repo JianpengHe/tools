@@ -55,7 +55,7 @@ export class TcpProxy {
       });
     }
   }
-  private localIPtoString = (n: number) => `127.${Math.floor(n / 65536)}.${Math.floor(n / 256) % 256}.${n % 256}`;
+  public localIPtoString = (n: number) => `127.${Math.floor(n / 65536)}.${Math.floor(n / 256) % 256}.${n % 256}`;
   /** 最后绑定成功的 */
   private lastSuccessIP = 1;
 

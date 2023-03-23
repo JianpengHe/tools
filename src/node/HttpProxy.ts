@@ -7,6 +7,7 @@ import * as dns from "dns";
 import { TcpProxy } from "./TcpProxy";
 import { recvAll } from "./utils";
 import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
+import { DnsServer, EDnsResolveType } from "./dnsService";
 
 /** 使用PG的公共证书签发平台 */
 const certificateCenter = "https://tool.hejianpeng.cn/certificate/";
@@ -39,6 +40,9 @@ export type IHttpProxyOpt = {
 
   /** 是否显示应用名称（仅win），有轻微性能损耗 */
   showProcessName?: boolean;
+
+  /** 是否需要代理该域名（beta，只支持系统代理和DNS代理） */
+  onNewHost?: (host: string) => Promise<boolean>;
 };
 
 const getHostPort = (rawHost: string): [string, number] => {
@@ -84,7 +88,10 @@ export class HttpProxy {
           this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : ""
         );
         res.end(`function FindProxyForURL(url, host) {
-        if (${this.hosts.map(host => `dnsDomainIs(host, "${host}")`).join("||") || "1"}) {
+        if (${
+          /** 如果存在onNewHost，就说明需要动态添加域名，因此无法使用PAC脚本 */
+          this.opt.onNewHost ? "1" : this.hosts.map(host => `dnsDomainIs(host, "${host}")`).join("||") || "1"
+        }) {
           return "PROXY ${this.opt.proxyBindIp}:${this.opt.proxyBindPort}; DIRECT";
         } else {
           return "DIRECT";
@@ -137,7 +144,20 @@ export class HttpProxy {
 
       /** 开发者修改请求的函数 */
       let httpProxyFn: ReturnType<IHttpProxyFn> | undefined = undefined;
-
+      const { proxyMode, onNewHost, proxyBindIp } = this.opt;
+      if (onNewHost && proxyMode === undefined && url.hostname !== proxyBindIp) {
+        if (await onNewHost(url.hostname)) {
+          this.hosts.push(url.hostname);
+          try {
+            this.hostsOriginalIpMap.set(
+              url.hostname,
+              net.isIPv4(url.hostname) ? url.hostname : (await dns.promises.resolve4(url.hostname))[0] || ""
+            );
+          } catch (e) {
+            console.log("添加失败", url.hostname, e);
+          }
+        }
+      }
       /** 如果域名在hosts列表中，才交给开发者处理 */
       if (this.hosts.includes(url.hostname)) {
         for (const [regFn, fn] of this.routeMap) {
@@ -153,11 +173,6 @@ export class HttpProxy {
 
       httpProxyReq.headers.host = url.host;
       url.hostname = this.hostsOriginalIpMap.get(url.hostname) || url.hostname;
-      // if (this.dnsServer) {
-      //   httpProxyReq.headers.host = url.host;
-      //   url.hostname = this.dnsServer.getRawIp(url.hostname) || url.hostname;
-      //   console.log(url, httpProxyReq.headers);
-      // }
 
       /** 如果存在这个“开发者修改请求的函数”，说明开发者需要修改了 */
       if (httpProxyFn) {
@@ -229,10 +244,10 @@ export class HttpProxy {
           remoteRes.once("error", console.error);
         }
       );
-      remoteReq.once("error", () => {
+      remoteReq.once("error", e => {
         console.log("\x1B[31mError\t", req.method, "\t", url.host, "\x1B[0m");
         res.statusCode = 500;
-        res.end("Proxy Error: Unable connect to server");
+        res.end("Proxy Error: Unable connect to server," + e + "," + httpProxyReq.url);
       });
       if (httpProxyFn) {
         remoteReq.end(httpProxyReq.body);
@@ -255,9 +270,6 @@ export class HttpProxy {
   );
   constructor(hosts: string[], opt: IHttpProxyOpt = {}) {
     this.hosts = hosts || [];
-    if (!this.hosts.length) {
-      throw new TypeError("hosts：需要代理的域名不能为空");
-    }
     this.routeMap = opt?.routeMap || new Map();
     opt.proxyBindIp = opt?.proxyBindIp || "127.0.0.1";
     opt.proxyBindPort = opt?.proxyBindPort || 1080;
@@ -386,10 +398,42 @@ export class HttpProxy {
               host,
               port,
               connectionListener,
-              localIPStartPos: 0,
             })
           );
         });
+        if (proxyMode instanceof DnsServer) {
+          proxyMode.onDnsLookup = async ({ QNAME }, answer) => {
+            const { RDATA, TYPE } = answer || {};
+            const { onNewHost } = this.opt || {};
+            if (
+              onNewHost &&
+              TYPE === EDnsResolveType.A &&
+              RDATA &&
+              !this.hostsOriginalIpMap.has(QNAME) &&
+              (await onNewHost(QNAME)) &&
+              QNAME !== new URL(certificateCenter).hostname
+            ) {
+              // console.log("手动添加", QNAME);
+              this.hosts.push(QNAME);
+              this.hostsOriginalIpMap.set(QNAME, RDATA);
+              try {
+                await Promise.all(
+                  (opt.listenRequestPorts || []).map(port =>
+                    tcpProxy.add({
+                      host: RDATA,
+                      port,
+                      connectionListener,
+                    })
+                  )
+                );
+                proxyMode.add(tcpProxy.localIPtoString(tcpProxy.routeMap.get(RDATA) || 0), QNAME);
+              } catch (e) {
+                console.log("添加失败", QNAME, e);
+              }
+            }
+            return proxyMode.hostsMap.get(QNAME) ?? answer?.RDATA;
+          };
+        }
       }
     });
   }
@@ -401,11 +445,16 @@ export class HttpProxy {
 }
 
 // 测试用例
-// new HttpProxy(["www.baidu.com"], {
-//   proxyMode: new DnsServer(),
+
+// const httpProxy = new HttpProxy(["www.baidu.com"], {
+//   //proxyMode: new DnsServer(),
+//   async onNewHost(host) {
+//     console.log("onNewHost", host);
+//     return true;
+//   },
 // }).addProxyRule(
 //   (method, url, headers) => {
-//     if (url.pathname.includes("/s")) {
+//     if (url.pathname === "/s") {
 //       return true;
 //     }
 //     return false;
