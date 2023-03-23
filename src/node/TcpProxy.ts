@@ -74,7 +74,7 @@ export class TcpProxy {
     ITcpProxyAddOpt & { resolve: (netServer: net.Server) => void; reject: (reason?: any) => void }
   > = [];
   private createServerLock = false;
-  private async tryToCreateServer() {
+  private async tryToCreateServer(err = 0) {
     if (this.createServerLock || this.addQueue.length === 0) {
       return;
     }
@@ -82,12 +82,11 @@ export class TcpProxy {
     const { host, port, connectionListener, localIPStartPos, resolve, reject } = this.addQueue[0];
     try {
       const ip = net.isIPv4(host) ? host : (await dns.promises.resolve4(host))[0];
-
       const localIPNumber =
-        localIPStartPos || this.routeMap.get(ip) || this.lastSuccessIP + (localIPStartPos === 0 ? 0 : 1);
+        (localIPStartPos || this.routeMap.get(ip) || this.lastSuccessIP + (localIPStartPos === 0 ? 0 : 1)) + err;
       const errFn = e => {
         console.log("TCP Proxy\t\x1B[31m重新绑定\x1B[0m\t");
-
+        //console.log(e);
         this.createServerLock = false;
         if (localIPStartPos === undefined) {
           /** 尝试绑定下一个localIP */
@@ -96,7 +95,7 @@ export class TcpProxy {
           this.addQueue.splice(0, 1);
           reject(new Error(e));
         }
-        this.tryToCreateServer();
+        this.tryToCreateServer(err + 1);
       };
       const localIP = this.localIPtoString(localIPNumber);
 
@@ -144,8 +143,7 @@ export class TcpProxy {
     if (ip === host) {
       /** 已经是ip，无需解析 */
       return;
-    }
-    if (this.dnsMode instanceof DnsServer) {
+    } else if (this.dnsMode instanceof DnsServer) {
       this.dnsMode.add(localIP, host);
       return;
     }

@@ -10,7 +10,7 @@ import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
 
 /** 使用PG的公共证书签发平台 */
-const certificateCenter = "https://tool.hejianpeng.cn/certificate/";
+const certificateCenter = "https://tool.hejianpeng.cn/certificate/"; //"http://127.0.0.1:56482/"
 export type IHttpProxyReq = {
   method: string;
   url: URL;
@@ -30,6 +30,7 @@ export type IHttpProxyRegFn = (method: string, url: URL, headers: http.IncomingH
 export type IHttpProxyOpt = {
   /** 接受DnsServer对象、host文件地址，不传默认httpProxy模式 */
   proxyMode?: TcpProxy["dnsMode"];
+  /** dnsMode为httpProxy时，代表【代理服务器】的地址，当dnsMode为DnsServer对象时，代表【中转服务器】地址（而不是使用127.xx.xx.xx，方便其他终端调试） */
   proxyBindIp?: string; // "127.0.0.1"
   proxyBindPort?: number; // 1080
   listenRequestPorts?: number[]; //[80,443]
@@ -402,37 +403,42 @@ export class HttpProxy {
           );
         });
         if (proxyMode instanceof DnsServer) {
-          proxyMode.onDnsLookup = async ({ QNAME }, answer) => {
-            const { RDATA, TYPE } = answer || {};
-            const { onNewHost } = this.opt || {};
-            if (
-              onNewHost &&
-              TYPE === EDnsResolveType.A &&
-              RDATA &&
-              !this.hostsOriginalIpMap.has(QNAME) &&
-              (await onNewHost(QNAME)) &&
-              QNAME !== new URL(certificateCenter).hostname
-            ) {
-              // console.log("手动添加", QNAME);
-              this.hosts.push(QNAME);
-              this.hostsOriginalIpMap.set(QNAME, RDATA);
-              try {
-                await Promise.all(
-                  (opt.listenRequestPorts || []).map(port =>
-                    tcpProxy.add({
-                      host: RDATA,
-                      port,
-                      connectionListener,
-                    })
-                  )
-                );
-                proxyMode.add(tcpProxy.localIPtoString(tcpProxy.routeMap.get(RDATA) || 0), QNAME);
-              } catch (e) {
-                console.log("添加失败", QNAME, e);
+          const { onNewHost, proxyBindIp } = this.opt || {};
+          if (!onNewHost && proxyBindIp) {
+            tcpProxy.localIPtoString = () => "10.11.45.17";
+          } else {
+            proxyMode.onDnsLookup = async ({ QNAME }, answer) => {
+              const { RDATA, TYPE } = answer || {};
+
+              if (
+                onNewHost &&
+                TYPE === EDnsResolveType.A &&
+                RDATA &&
+                !this.hostsOriginalIpMap.has(QNAME) &&
+                (await onNewHost(QNAME)) &&
+                QNAME !== new URL(certificateCenter).hostname
+              ) {
+                // console.log("手动添加", QNAME);
+                this.hosts.push(QNAME);
+                this.hostsOriginalIpMap.set(QNAME, RDATA);
+                try {
+                  await Promise.all(
+                    (opt.listenRequestPorts || []).map(port =>
+                      tcpProxy.add({
+                        host: RDATA,
+                        port,
+                        connectionListener,
+                      })
+                    )
+                  );
+                  proxyMode.add(tcpProxy.localIPtoString(tcpProxy.routeMap.get(RDATA) || 0), QNAME);
+                } catch (e) {
+                  console.log("添加失败", QNAME, e);
+                }
               }
-            }
-            return proxyMode.hostsMap.get(QNAME) ?? answer?.RDATA;
-          };
+              return proxyMode.hostsMap.get(QNAME) ?? answer?.RDATA;
+            };
+          }
         }
       }
     });
