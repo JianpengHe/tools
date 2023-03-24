@@ -5,7 +5,7 @@ import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
 import { TcpProxy } from "./TcpProxy";
-import { recvAll, SaveLog } from "./utils";
+import { recvAll } from "./utils";
 import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
 export type IHttpProxyReq = {
