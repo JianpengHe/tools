@@ -5,12 +5,9 @@ import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
 import { TcpProxy } from "./TcpProxy";
-import { recvAll } from "./utils";
+import { recvAll, SaveLog } from "./utils";
 import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
-
-/** 使用PG的公共证书签发平台 */
-const certificateCenter = "https://tool.hejianpeng.cn/certificate/"; //"http://127.0.0.1:56482/"
 export type IHttpProxyReq = {
   method: string;
   url: URL;
@@ -51,22 +48,25 @@ const getHostPort = (rawHost: string): [string, number] => {
   return [host, Number(port || 0)];
 };
 
-export const createSecureContext = async (host: string): Promise<tls.SecureContext> =>
-  new Promise((resolve, reject) => {
-    https
-      .get(`${certificateCenter}${host}`, async res => {
-        res.once("error", reject);
-        try {
-          resolve(tls.createSecureContext(JSON.parse(String(await recvAll(res)))));
-        } catch (e) {
-          reject(e);
-        }
-      })
-      .once("error", reject);
-  });
 export class HttpProxy {
+  /** 使用PG的公共证书签发平台 */
+  private readonly certificateCenter: URL;
+  /** 获取SSL证书 */
+  private readonly createSecureContext = async (host: string): Promise<tls.SecureContext> =>
+    new Promise((resolve, reject) => {
+      (this.certificateCenter.protocol === "https:" ? https : http)
+        .get(`${this.certificateCenter}/${host}`, async res => {
+          res.once("error", reject);
+          try {
+            resolve(tls.createSecureContext(JSON.parse(String(await recvAll(res)))));
+          } catch (e) {
+            reject(e);
+          }
+        })
+        .once("error", reject);
+    });
   /** 需要代理哪些域名 */
-  private hosts: string[];
+  private readonly hosts: string[];
   /** 这些域名对应的初始IP */
   private readonly hostsOriginalIpMap: Map<string, string> = new Map();
   /** 唯一标志 */
@@ -269,7 +269,7 @@ export class HttpProxy {
       );
     }
   );
-  constructor(hosts: string[], opt: IHttpProxyOpt = {}) {
+  constructor(hosts: string[], opt: IHttpProxyOpt = {}, certificateCenter = "https://tool.hejianpeng.cn/certificate") {
     this.hosts = hosts || [];
     this.routeMap = opt?.routeMap || new Map();
     opt.proxyBindIp = opt?.proxyBindIp || "127.0.0.1";
@@ -279,6 +279,7 @@ export class HttpProxy {
     opt.autoSettings = opt?.autoSettings ?? true;
     opt.showProcessName = opt?.showProcessName ?? true;
     this.opt = opt;
+    this.certificateCenter = new URL(certificateCenter);
     this.proxyServer.once("error", console.error);
     Promise.all(
       hosts.map(
@@ -309,7 +310,7 @@ export class HttpProxy {
       });
       console.log("\t");
       console.warn(
-        `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${certificateCenter}，否则不支持HTTPS\x1B[0m`
+        `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}/，否则不支持HTTPS\x1B[0m`
       );
 
       if (proxyMode === undefined) {
@@ -326,7 +327,7 @@ export class HttpProxy {
                 /** 把soket套一层SSL */
                 new tls.TLSSocket(socket, {
                   isServer: true,
-                  secureContext: await createSecureContext(host),
+                  secureContext: await this.createSecureContext(host),
                 })
               );
             } catch (e) {
@@ -358,6 +359,7 @@ export class HttpProxy {
           );
         }
       } else {
+        const that = this;
         /** tls解析器，把https的请求转换成普通http */
         const tlsServer = tls.createServer(
           {
@@ -367,7 +369,7 @@ export class HttpProxy {
                 return;
               }
               try {
-                callback(null, await createSecureContext(servername));
+                callback(null, await that.createSecureContext(servername));
               } catch (e: any) {
                 callback(e);
               }
@@ -399,46 +401,46 @@ export class HttpProxy {
               host,
               port,
               connectionListener,
+              localIPStartPos: 0,
             })
           );
         });
         if (proxyMode instanceof DnsServer) {
           const { onNewHost, proxyBindIp } = this.opt || {};
-          if (!onNewHost && proxyBindIp) {
-            tcpProxy.localIPtoString = () => "10.11.45.17";
-          } else {
-            proxyMode.onDnsLookup = async ({ QNAME }, answer) => {
-              const { RDATA, TYPE } = answer || {};
-
-              if (
-                onNewHost &&
-                TYPE === EDnsResolveType.A &&
-                RDATA &&
-                !this.hostsOriginalIpMap.has(QNAME) &&
-                (await onNewHost(QNAME)) &&
-                QNAME !== new URL(certificateCenter).hostname
-              ) {
-                // console.log("手动添加", QNAME);
-                this.hosts.push(QNAME);
-                this.hostsOriginalIpMap.set(QNAME, RDATA);
-                try {
-                  await Promise.all(
-                    (opt.listenRequestPorts || []).map(port =>
-                      tcpProxy.add({
-                        host: RDATA,
-                        port,
-                        connectionListener,
-                      })
-                    )
-                  );
-                  proxyMode.add(tcpProxy.localIPtoString(tcpProxy.routeMap.get(RDATA) || 0), QNAME);
-                } catch (e) {
-                  console.log("添加失败", QNAME, e);
-                }
-              }
-              return proxyMode.hostsMap.get(QNAME) ?? answer?.RDATA;
-            };
+          if (proxyBindIp) {
+            tcpProxy.localIPtoString = () => proxyBindIp;
           }
+          proxyMode.onDnsLookup = async ({ QNAME }, answer) => {
+            const { RDATA, TYPE } = answer || {};
+            if (
+              onNewHost &&
+              TYPE === EDnsResolveType.A &&
+              RDATA &&
+              !this.hostsOriginalIpMap.has(QNAME) &&
+              (await onNewHost(QNAME)) &&
+              QNAME !== this.certificateCenter.hostname
+            ) {
+              // console.log("手动添加", QNAME);
+              this.hosts.push(QNAME);
+              this.hostsOriginalIpMap.set(QNAME, RDATA);
+              try {
+                await Promise.all(
+                  (opt.listenRequestPorts || []).map(port =>
+                    tcpProxy.add({
+                      host: RDATA,
+                      port,
+                      connectionListener,
+                      localIPStartPos: 0,
+                    })
+                  )
+                );
+                proxyMode.add(tcpProxy.localIPtoString(tcpProxy.routeMap.get(RDATA) || 0), QNAME);
+              } catch (e) {
+                console.log("添加失败", QNAME, e);
+              }
+            }
+            return proxyMode.hostsMap.get(QNAME) ?? answer?.RDATA;
+          };
         }
       }
     });
@@ -452,25 +454,34 @@ export class HttpProxy {
 
 // 测试用例
 
-// const httpProxy = new HttpProxy(["www.baidu.com"], {
-//   //proxyMode: new DnsServer(),
+// const saveLog = new SaveLog();
+// new HttpProxy(["fanyi.baidu.com", "www.baidu.com"], {
+//   proxyMode: new DnsServer(),
 //   async onNewHost(host) {
 //     console.log("onNewHost", host);
 //     return true;
 //   },
 // }).addProxyRule(
 //   (method, url, headers) => {
-//     if (url.pathname === "/s") {
-//       return true;
-//     }
-//     return false;
+//     return true;
 //   },
 //   async function* (localReq) {
 //     console.log(String(localReq.body));
 //     const remoteReq: Partial<IHttpProxyReq> = {};
 //     const remoteRes = yield remoteReq;
 //     console.log(String(remoteRes.body));
-//     const localRes: Partial<IHttpProxyRes> = { body: "禁止访问百度" };
+//     const localRes: Partial<IHttpProxyRes> = {
+//       // body: "禁止访问百度",
+//     };
+//     saveLog.add({
+//       localReq: { ...localReq, body: String(localReq.body) },
+//       remoteReq,
+//       localRes,
+//       remoteRes: { ...remoteRes, body: String(remoteRes.body) },
+
+//       time: new Date().toLocaleString(),
+//     });
+
 //     return localRes;
 //   }
 // );
