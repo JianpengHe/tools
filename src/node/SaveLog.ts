@@ -7,10 +7,10 @@ export class SaveLog {
   constructor(filePath: string = __filename + "_log.json", saveInterval = 5000) {
     this.filePath = filePath;
     this.saveInterval = saveInterval;
+    afterExit(() => fs.writeFileSync(this.filePath, JSON.stringify(this.log, null, 2)));
     try {
       this.log = JSON.parse(String(fs.readFileSync(filePath)));
     } catch (e) {}
-    afterExit(() => this.save());
   }
   private needSave = false;
   public save() {
@@ -30,3 +30,10 @@ export class SaveLog {
     }
   }
 }
+
+// 测试用例
+// const saveLog = new SaveLog("t.json");
+// saveLog.add({ a: 1 });
+// setTimeout(() => {
+//   saveLog.add({ b: 1 });
+// }, 2000);

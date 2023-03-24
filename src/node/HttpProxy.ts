@@ -55,7 +55,7 @@ export class HttpProxy {
   private readonly createSecureContext = async (host: string): Promise<tls.SecureContext> =>
     new Promise((resolve, reject) => {
       (this.certificateCenter.protocol === "https:" ? https : http)
-        .get(`${this.certificateCenter}/${host}`, async res => {
+        .get(`${this.certificateCenter}${host}`, async res => {
           res.once("error", reject);
           try {
             resolve(tls.createSecureContext(JSON.parse(String(await recvAll(res)))));
@@ -269,7 +269,7 @@ export class HttpProxy {
       );
     }
   );
-  constructor(hosts: string[], opt: IHttpProxyOpt = {}, certificateCenter = "https://tool.hejianpeng.cn/certificate") {
+  constructor(hosts: string[], opt: IHttpProxyOpt = {}, certificateCenter = "https://tool.hejianpeng.cn/certificate/") {
     this.hosts = hosts || [];
     this.routeMap = opt?.routeMap || new Map();
     opt.proxyBindIp = opt?.proxyBindIp || "127.0.0.1";
