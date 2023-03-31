@@ -4,7 +4,7 @@ export class SaveLog {
   private readonly filePath: string;
   public saveInterval: number;
   public log: any[] = [];
-  constructor(filePath: string = __filename + "_log.json", saveInterval = 5000) {
+  constructor(filePath: string = (require.main?.filename || process.argv[1]) + "_log.json", saveInterval = 5000) {
     this.filePath = filePath;
     this.saveInterval = saveInterval;
     afterExit(() => fs.writeFileSync(this.filePath, JSON.stringify(this.log, null, 2)));

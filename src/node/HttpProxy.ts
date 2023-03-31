@@ -41,6 +41,9 @@ export type IHttpProxyOpt = {
 
   /** 是否需要代理该域名（beta，只支持系统代理和DNS代理） */
   onNewHost?: (host: string) => Promise<boolean>;
+
+  /** 关闭回环检测（不再添加pg_no_loop_token请求头，可能会导致代理自己请求自己的死循环） */
+  disabledLoopCheck?: boolean;
 };
 
 const getHostPort = (rawHost: string): [string, number] => {
@@ -106,12 +109,13 @@ export class HttpProxy {
         return;
       }
       /** 判断回环的几种方法，但还没定下来最好的方法。。。 */
-      if (req.headers["pg_no_loop_token"] === this.token) {
-        res.end("loop");
-        return;
+      if (!this.opt.disabledLoopCheck) {
+        if (req.headers["pg_no_loop_token"] === this.token) {
+          res.end("loop");
+          return;
+        }
+        req.headers["pg_no_loop_token"] = this.token;
       }
-      req.headers["pg_no_loop_token"] = this.token;
-
       // if (!encrypted && req.url[0] === "/") {
       //   res.statusCode = 403;
       //   res.end("proxyServer");
@@ -300,8 +304,19 @@ export class HttpProxy {
       console.log("需要代理的域名对应的ip");
       ips.forEach((ip, i) => {
         if (ip && ip[0]) {
-          if (proxyMode === undefined && ip[0] === opt.proxyBindIp) {
-            console.log("域名", this.hosts[i], "的IP地址不能与代理地址相同");
+          if (
+            proxyMode === undefined &&
+            ip[0] === opt.proxyBindIp &&
+            opt.listenRequestPorts?.includes(opt.proxyBindPort || 0)
+          ) {
+            console.log(
+              "域名",
+              this.hosts[i],
+              "的IP地址和绑定端口不能与代理地址(",
+              opt.proxyBindIp,
+              opt.proxyBindPort,
+              ")相同"
+            );
             throw new TypeError("请关闭其他正在运行的HttpProxy或DnsServer");
           }
           console.log(ip[0].padEnd(15, " "), "\t", this.hosts[i]);
