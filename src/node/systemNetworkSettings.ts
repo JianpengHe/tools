@@ -293,6 +293,32 @@ export const createTrojanSocket: (
     resolve(sock);
   });
 
+export type IGetPhysicalNetworkInterfaces = os.NetworkInterfaceInfo & { name: string };
+/** 获取物理网卡（出口网卡）的地址 */
+export const getPhysicalNetworkInterfaces = (
+  host = "www.baidu.com",
+  port = 80
+): Promise<IGetPhysicalNetworkInterfaces[]> =>
+  new Promise((resolve, reject) => {
+    const sock = net.connect({ host, port });
+    sock.once("connect", () => {
+      const { localAddress } = sock;
+      const allNetworkInterfaces = Object.entries(os.networkInterfaces())
+        .map(([name, networkInterfaces]) =>
+          (networkInterfaces || []).map(networkInterface => ({ name, ...networkInterface }))
+        )
+        .flat();
+      if (localAddress) {
+        const physicalName = new Set(
+          allNetworkInterfaces.filter(({ address }) => address === localAddress).map(({ name }) => name)
+        );
+        resolve(allNetworkInterfaces.filter(({ name }) => physicalName.has(name)));
+      }
+      sock.destroy();
+    });
+    sock.on("error", reject);
+  });
+
 //测试用例
 // const trojanTarget = "dHxxxxxx==";
 // // const host = "2022.ip138.com";
