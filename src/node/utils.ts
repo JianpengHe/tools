@@ -1,5 +1,7 @@
 import * as stream from "stream";
 import * as events from "events";
+import * as crypto from "crypto";
+import { BinaryToTextEncoding } from "crypto";
 
 export type IReadStream = stream.Readable | stream.Duplex;
 export const recvAll = (stream: IReadStream): Promise<Buffer> =>
@@ -27,3 +29,15 @@ export declare interface TypedEventEmitter<Events extends EmittedEvents> {
   rawListeners<E extends keyof Events>(eventName: E): Events[E][];
 }
 export class TypedEventEmitter<Events extends EmittedEvents> extends events.EventEmitter {}
+
+export function getHash(algorithm: string, data: crypto.BinaryLike): Buffer;
+export function getHash(algorithm: string, data: crypto.BinaryLike, encoding: BinaryToTextEncoding): string;
+export function getHash(algorithm: string, data: crypto.BinaryLike, encoding?: BinaryToTextEncoding): string | Buffer {
+  const hash = crypto.createHash(algorithm).update(data);
+  if (encoding) {
+    return hash.digest(encoding);
+  }
+  return hash.digest();
+}
+
+export const sleep = (time: number) => new Promise(resolve => setTimeout(resolve, time));

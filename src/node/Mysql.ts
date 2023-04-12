@@ -1,13 +1,9 @@
 import { Buf, getNumberLen } from "./Buf";
 import * as net from "net";
-import * as crypto from "crypto";
 import * as stream from "stream";
 import { ReliableSocket } from "./ReliableSocket";
 import { RecvStream } from "./RecvStream";
-import { TypedEventEmitter } from "./utils";
-
-export const SHA1 = (str: Buffer) => crypto.createHash("sha1").update(str).digest();
-
+import { getHash, TypedEventEmitter } from "./utils";
 export class MysqlBuf extends Buf {
   constructor(buf?: Buffer, offset?: number) {
     super(buf, offset);
@@ -320,13 +316,14 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     loginBuf.writeUIntLE(res.character_set === "utf8mb4" ? 45 : 33, 1);
     loginBuf.alloc(23, 0);
     loginBuf.writeStringNUL(res.username, loginBuf.offset + 23);
-    const password_sha1 = SHA1(Buffer.from(res.password));
+    const password_sha1 = getHash("sha1", Buffer.from(res.password));
     const password = Buffer.alloc(password_sha1.length);
-    SHA1(Buffer.concat([info.auth_plugin_data_part_1, info.auth_plugin_data_part_2, SHA1(password_sha1)])).forEach(
-      (byte, i) => {
-        password[i] = byte ^ password_sha1[i];
-      }
-    );
+    getHash(
+      "sha1",
+      Buffer.concat([info.auth_plugin_data_part_1, info.auth_plugin_data_part_2, getHash("sha1", password_sha1)])
+    ).forEach((byte, i) => {
+      password[i] = byte ^ password_sha1[i];
+    });
     loginBuf.writeUIntLE(password.length, 1);
     loginBuf.write(password);
     loginBuf.writeStringNUL(res.database);
