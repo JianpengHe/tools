@@ -32,13 +32,25 @@ export const quitWebview = (httpProxy: HttpProxy): HttpProxy => {
     };
     window.addEventListener("keydown", ({ keyCode, ctrlKey }) => {
       if (ctrlKey && keyCode === 81) {
-        window.document.write(
-          `<form method="post" action="/quitWebview?from=${encodeURIComponent(
-            window.location.href
-          )}"><input name="script" /></form><script>(${String(quitWebviewScript)})(window)</scr` + `ipt>`
-        );
+        copy();
       }
     });
+    const copy = () => {
+      window.document.write(
+        `<form method="post" action="/quitWebview?from=${encodeURIComponent(
+          window.location.href
+        )}"><input name="script" /></form><script>(${String(quitWebviewScript)})(window)</scr` + `ipt>`
+      );
+    };
+    (dom => {
+      dom.innerHTML = "已代理成功，按Ctrl+Q或点击此处复制当前页面到其他浏览器";
+      dom.style.cssText = `position: fixed;background: red;z-index: 999999;color: #fff;padding: 12px;top: 0;left: 0;font-size: 12px;">已代理成功，按</div>`;
+      window.document.body.appendChild(dom);
+      dom.onclick = copy;
+      setTimeout(() => {
+        window.document.body.removeChild(dom);
+      }, 3000);
+    })(window.document.createElement("div"));
   };
   httpProxy.addProxyRule(
     () => true,
@@ -77,7 +89,7 @@ export const quitWebview = (httpProxy: HttpProxy): HttpProxy => {
           `;
           lockUA = headers["user-agent"];
           console.log("请打开" + headers.host + "/quitWebview", "已锁定UA", lockUA);
-          child_process.exec("start https://"+headers.host + "/quitWebview",()=>{})
+          child_process.exec("start https://" + headers.host + "/quitWebview", () => {});
         } else if (nowUA !== headers["user-agent"]) {
           console.log("已打开默认浏览器");
           // 默认浏览器的请求
@@ -95,7 +107,7 @@ export const quitWebview = (httpProxy: HttpProxy): HttpProxy => {
       }
 
       /** webview */
-      if (!lockUA || lockUA === localReq.headers["user-agent"]) {
+      if (!lockUA || lockUA === nowUA) {
         /** 汇总所有header */
         for (const k in localReq.headers) {
           headers[k.toLowerCase()] = String(localReq.headers[k] || "");
@@ -106,10 +118,14 @@ export const quitWebview = (httpProxy: HttpProxy): HttpProxy => {
             cookiePool.set(key.trim(), value.trim());
           }
         }
-      }
-
-      if (res.headers["content-type"]?.includes("text/html") || localReq.headers.accept?.includes("html")) {
-        res.body = String(res.body) + `<script>(${String(script)})(window)</script>`;
+        const resBody = String(res.body);
+        const bodyIndex = resBody.lastIndexOf("</html>");
+        if (bodyIndex > 0) {
+          res.body =
+            resBody.substring(0, bodyIndex) +
+            `<script>(${String(script)})(window)</script>` +
+            resBody.substring(bodyIndex);
+        }
       }
       return {};
     }
@@ -118,4 +134,7 @@ export const quitWebview = (httpProxy: HttpProxy): HttpProxy => {
 };
 
 /** 测试用例 */
-quitWebview(new HttpProxy(["open.es.xiaojukeji.com"]));
+// quitWebview(new HttpProxy(["fs.sf-express.com"]));
+// quitWebview(
+//   new HttpProxy(["sf-express.com"], { proxyMode: new DnsServer(), onNewHost: async host => /\.sf-express\.com$/.test(host) })
+// );
