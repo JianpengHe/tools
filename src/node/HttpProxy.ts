@@ -183,7 +183,11 @@ export class HttpProxy {
       if (httpProxyFn) {
         const { value } = await httpProxyFn.next();
         if (value !== null) {
+          /** 删除所有304缓存的请求头 */
+          delete httpProxyReq.headers["if-match"];
+          delete httpProxyReq.headers["if-modified-since"];
           delete httpProxyReq.headers["if-none-match"];
+          delete httpProxyReq.headers["if-unmodified-since"];
           Object.entries(value || {}).forEach(([key, value]) => {
             httpProxyReq[key] = value;
           });
