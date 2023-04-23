@@ -107,11 +107,14 @@ export class CookieStore {
   }
 
   public get(url: URL) {
-    const uRLSearchParams = new URLSearchParams();
-    for (const { key, value } of this.getRaw(url)) {
-      uRLSearchParams.append(key, value);
-    }
-    return String(uRLSearchParams).replace(/&/g, "; ");
+    // const uRLSearchParams = new URLSearchParams();
+    // for (const { key, value } of this.getRaw(url)) {
+    //   uRLSearchParams.append(key, value);
+    // }
+    // return String(uRLSearchParams).replace(/&/g, "; ");
+    return this.getRaw(url)
+      .map(({ key, value }) => `${key}=${value}`)
+      .join("; ");
   }
 }
 
