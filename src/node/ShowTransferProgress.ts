@@ -17,6 +17,9 @@ export class ShowTransferProgress {
   }
   add(filesize: number) {
     this.filesize += filesize;
+    if (this.totalSize === this.filesize) {
+      this.end();
+    }
   }
   setInterval() {
     const now = new Date().getTime();
@@ -45,7 +48,7 @@ export class ShowTransferProgress {
   showSize(byte: number) {
     return "kMGTP"
       .split("")
-      .reduce((a, b) => (a[0] > 1024 ? [Number(a[0]) / 1024, b + "iB"] : a), [byte, "B"])
+      .reduce((a, b) => (Number(a[0]) > 1024 ? [Number(a[0]) / 1024, b + "iB"] : a), [byte, "B"])
       .map((a, i) =>
         i ? a : `\x1B[33m${`${(a = String(a))}${a.includes(".") ? "" : "."}`.substring(0, 6).padEnd(6, "0")}\x1B[0m`
       );
