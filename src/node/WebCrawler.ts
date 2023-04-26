@@ -4,6 +4,7 @@ import * as https from "https";
 import * as fs from "fs";
 import * as tls from "tls";
 import * as zlib from "zlib";
+import * as path from "path";
 import { getHash, recvAll, sleep } from "./utils";
 
 export type IWebCrawlerRequest = https.RequestOptions & { body?: Buffer | string };
@@ -17,15 +18,21 @@ export type IWebCrawlerCallBackOpt = {
 };
 
 export type IWebCrawlerOpt = {
-  /** 每个请求 */
+  /** 每个请求间隔 */
   sleep?: number;
+  /** 最大并发 */
   maxSockets?: number;
+  /** 保存到硬盘之前要干点啥（如果使用了硬盘缓存的话，这个回调不会触发） */
   onSave?: (opt: Required<IWebCrawlerCallBackOpt>) => void;
+  /** 要读取硬盘文件、发起请求之前干点啥 */
   onRequest?: (opt: IWebCrawlerCallBackOpt) => void;
+  /** 使用http网络代理（就是俗称梯子的东西） */
   httpProxy?: {
     host: string;
     port: number;
   };
+  /** 保存缓存时是否自动、递归创建目录（默认主动创建目录），若目录不存在会无法写入文件缓存，但不影响整体运行 */
+  isMkDir?: boolean;
 };
 const httpAgentUseProxy = (
   agent: (https.Agent | http.Agent) & { createConnection?: any; totalSocketCount?: any },
@@ -57,6 +64,7 @@ export class WebCrawler {
   public maxSockets = 10;
   public httpAgent: http.Agent;
   public httpsAgent: https.Agent;
+  public isMkDir: boolean = true;
   public onRequest?: IWebCrawlerOpt["onRequest"];
   public onSave?: IWebCrawlerOpt["onSave"];
   constructor(opt?: IWebCrawlerOpt) {
@@ -131,8 +139,21 @@ export class WebCrawler {
     webCrawlerCallBackOpt.res = response;
     /** 交由开发者修改 */
     this.onSave && this.onSave(webCrawlerCallBackOpt as Required<IWebCrawlerCallBackOpt>);
-    if (webCrawlerCallBackOpt.savePath && response.body) {
-      await fs.promises.writeFile(webCrawlerCallBackOpt.savePath, response.body);
+    if (webCrawlerCallBackOpt.savePath && response.body && response.body.length) {
+      try {
+        await fs.promises.writeFile(webCrawlerCallBackOpt.savePath, response.body);
+      } catch (e: any) {
+        if (this.isMkDir && e.code === "ENOENT" && e.path) {
+          try {
+            await fs.promises.mkdir(path.parse(e.path).dir, { recursive: true });
+            await fs.promises.writeFile(webCrawlerCallBackOpt.savePath, response.body);
+          } catch (e) {
+            console.log(new Date().toLocaleString(), e);
+          }
+        } else {
+          console.log(new Date().toLocaleString(), e);
+        }
+      }
     }
     webCrawlerCallBackOpt.onInfo && webCrawlerCallBackOpt.onInfo({ from: "net", res: response });
     if (this.sleep) {
