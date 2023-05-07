@@ -34,6 +34,7 @@ export class Buf {
     this.buffer = buf ?? Buffer.allocUnsafe(0);
     this.offset = offset ?? 0;
   }
+
   public UIntLEToBuffer(number: number, byteLength?: number) {
     byteLength = byteLength || getNumberLen(number, true);
     if (byteLength > 6) {
@@ -82,6 +83,7 @@ export class Buf {
       return buf;
     }
   }
+
   public alloc(length: number, fill?: number) {
     const buf = Buffer.allocUnsafe(length);
     if (fill !== undefined) {
@@ -108,6 +110,7 @@ export class Buf {
     }
     return this.lastReadValue;
   }
+
   public readUIntBE(byteLength: number, offset?: number): number {
     this.offset = offset ?? this.offset;
     if (byteLength > 6) {
@@ -136,6 +139,35 @@ export class Buf {
     this.offset += byteLength;
     return this.lastReadValue;
   }
+  public readIntBE(byteLength: number, offset?: number): number {
+    this.offset = offset ?? this.offset;
+    if (byteLength > 6) {
+      let buffer = this.buffer.subarray(this.offset, this.offset + byteLength);
+      if (buffer.length < 8) {
+        buffer = Buffer.concat([Buffer.alloc(8 - buffer.length), buffer]);
+      }
+      this.lastReadValue = Number(buffer.readBigInt64BE());
+    } else {
+      this.lastReadValue = this.buffer.readIntBE(this.offset, byteLength);
+    }
+    this.offset += byteLength;
+    return this.lastReadValue;
+  }
+  public readIntLE(byteLength: number, offset?: number): number {
+    this.offset = offset ?? this.offset;
+    if (byteLength > 6) {
+      let buffer = this.buffer.subarray(this.offset, this.offset + byteLength);
+      if (buffer.length < 8) {
+        buffer = Buffer.concat([buffer, Buffer.alloc(8 - buffer.length)]);
+      }
+      this.lastReadValue = Number(buffer.readBigInt64LE());
+    } else {
+      this.lastReadValue = this.buffer.readIntLE(this.offset, byteLength);
+    }
+    this.offset += byteLength;
+    return this.lastReadValue;
+  }
+
   public write(buf: Buffer, offset?: number) {
     offset = offset ?? this.offset;
     this.offset = offset < 0 ? this.buffer.length : offset;
@@ -147,6 +179,7 @@ export class Buf {
     });
     return this;
   }
+
   public writeUIntBE(number: number, byteLength?: number, offset?: number) {
     return this.write(this.UIntBEToBuffer(number, byteLength), offset);
   }
@@ -159,6 +192,7 @@ export class Buf {
   public writeIntLE(number: number, byteLength?: number, offset?: number) {
     return this.write(this.IntLEToBuffer(number, byteLength), offset);
   }
+
   public writeStringNUL(str: string | Buffer, offset?: number) {
     return this.write(Buffer.concat([Buffer.from(str), this.UIntBEToBuffer(0)]), offset);
   }
@@ -177,21 +211,26 @@ export class Buf {
 // const byte = 7;
 // const buf = new Buf(Buffer.alloc(8));
 // const buffer = Buffer.alloc(8);
-
-// let num = 2 ** (byte * 8 - 1) - 24;
+// let num = 2 ** (byte * 8 - 1) * 2; //- 1024;
 
 // buf.writeUIntBE(num, undefined, 8 - byte);
 // buffer.writeBigUInt64BE(BigInt(num));
-
 // console.log(
 //   buf.buffer,
 //   buffer,
 //   num,
-//   new Buf(buffer.subarray()).readUIntBE(byte, 8 - byte),
+//   new Buf(buffer).readUIntBE(byte, 8 - byte),
 //   buf.buffer.readBigUInt64BE()
 // );
 
 // buf.writeUIntLE(num);
 // buffer.writeBigUInt64LE(BigInt(num));
+// console.log(buf.buffer, buffer, num, new Buf(buffer).readUIntLE(byte), buf.buffer.readBigUInt64LE());
 
-// console.log(buf.buffer, buffer, num, new Buf(buffer.subarray()).readUIntLE(byte), buf.buffer.readBigUInt64LE());
+// buf.writeIntLE(num);
+// buffer.writeBigInt64LE(BigInt(num));
+// console.log(buf.buffer, buffer, num, new Buf(buffer).readIntLE(byte), buf.buffer.readBigInt64LE());
+
+// buf.writeIntBE(num);
+// buffer.writeBigInt64BE(BigInt(num));
+// console.log(buf.buffer, buffer, num, new Buf(buffer).readIntBE(8), buf.buffer.readBigInt64BE());
