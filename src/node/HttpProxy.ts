@@ -293,24 +293,24 @@ export class HttpProxy {
       hosts.map(
         host =>
           new Promise(resolve =>
-            dns.resolve(host, (err, addresses) => {
+            dns.lookup(host, (err, addresses) => {
               if (err || !addresses) {
                 console.warn("\x1B[33m找不到", host, "的DNS记录，已解析到本地:127.0.0.1\x1B[0m");
-                resolve(["127.0.0.1"]);
+                resolve("127.0.0.1");
                 return;
               }
               resolve(addresses);
             })
-          ) as Promise<string[]>
+          ) as Promise<string>
       )
     ).then(ips => {
       const { proxyMode } = opt;
       console.log("需要代理的域名对应的ip");
       ips.forEach((ip, i) => {
-        if (ip && ip[0]) {
+        if (ip) {
           if (
             proxyMode === undefined &&
-            ip[0] === opt.proxyBindIp &&
+            ip === opt.proxyBindIp &&
             opt.listenRequestPorts?.includes(opt.proxyBindPort || 0)
           ) {
             console.log(
@@ -323,8 +323,8 @@ export class HttpProxy {
             );
             throw new TypeError("请关闭其他正在运行的HttpProxy或DnsServer");
           }
-          console.log(ip[0].padEnd(15, " "), "\t", this.hosts[i]);
-          this.hostsOriginalIpMap.set(this.hosts[i], ip[0]);
+          console.log(ip.padEnd(15, " "), "\t", this.hosts[i]);
+          this.hostsOriginalIpMap.set(this.hosts[i], ip);
         }
       });
       console.log("\t");

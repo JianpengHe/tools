@@ -135,8 +135,7 @@ export class WebCrawler {
       req.once("error", reject);
       req.end(opt.body);
     });
-    // @ts-ignore
-    webCrawlerCallBackOpt.res = response;
+    (webCrawlerCallBackOpt as any).res = response;
     /** 交由开发者修改 */
     this.onSave && this.onSave(webCrawlerCallBackOpt as Required<IWebCrawlerCallBackOpt>);
     if (webCrawlerCallBackOpt.savePath && response.body && response.body.length) {
