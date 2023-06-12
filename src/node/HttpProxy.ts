@@ -4,6 +4,7 @@ import * as http from "http";
 import * as https from "https";
 import * as zlib from "zlib";
 import * as dns from "dns";
+import * as crypto from "crypto";
 import { TcpProxy } from "./TcpProxy";
 import { recvAll } from "./utils";
 import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
@@ -210,7 +211,12 @@ export class HttpProxy {
 
       const remoteReq = (url.protocol === "https:" ? https : http).request(
         httpProxyReq.url,
-        { method: httpProxyReq.method, headers: httpProxyReq.headers },
+        {
+          method: httpProxyReq.method,
+          headers: httpProxyReq.headers,
+          // allow legacy server
+          secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+        },
         async remoteRes => {
           /** 需要走拦截 */
           if (httpProxyFn) {
