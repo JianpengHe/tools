@@ -58,11 +58,14 @@ sock.on("message", (msg, rinfo) => {
         6
       )}:${msg.readUInt32LE(8)}`
     );
-    sock.send(
-      Buffer.from("hello"),
-      msg.readUInt32LE(8),
-      `${msg.readUInt16LE(0)}.${msg.readUInt16LE(2)}.${msg.readUInt16LE(4)}.${msg.readUInt16LE(6)}`
-    );
+    setInterval(() => {
+      sock.send(
+        Buffer.from("hello"),
+        msg.readUInt32LE(8),
+        `${msg.readUInt16LE(0)}.${msg.readUInt16LE(2)}.${msg.readUInt16LE(4)}.${msg.readUInt16LE(6)}`
+      );
+    }, 1000);
+
     return;
   }
 });
