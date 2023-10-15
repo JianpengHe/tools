@@ -1,4 +1,6 @@
 import * as dgram from "dgram";
+import * as fs from "fs";
+import { ReliableUdp } from "./ReliableUdp";
 
 /** 利用UDP打洞P2P */
 /** 服务器地址 */
@@ -40,7 +42,7 @@ sock.on("error", err => {
 });
 
 sock.on("message", (msg, rinfo) => {
-  console.log(`server got msg from ${rinfo.address}:${rinfo.port}`);
+  // console.log(`server got msg from ${rinfo.address}:${rinfo.port}`);
   if (IS_SERVER) {
     if (waitSock) {
       sock.send(stringifyIpPort(rinfo), waitSock.port, waitSock.address);
@@ -67,5 +69,11 @@ sock.on("message", (msg, rinfo) => {
     }, 1000);
 
     return;
+  }
+  if (!waitSock) {
+    waitSock = rinfo;
+    const stream = new ReliableUdp({ port: rinfo.port, ip: rinfo.address, sock });
+    fs.createReadStream("UdpHolePunch.js").pipe(stream);
+    stream.pipe(fs.createWriteStream("UdpHolePunch2.js"));
   }
 });
