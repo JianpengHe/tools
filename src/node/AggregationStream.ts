@@ -1,9 +1,9 @@
 import * as stream from "stream";
 
 export class AggregationStream extends stream.Readable {
-  private chuckCount: number;
-  private threadCount: number;
-  private callback: (index: number, threadId: number) => Promise<Buffer>;
+  private chuckCount: number = 0;
+  private threadCount: number = 0;
+  private callback: (index: number, threadId: number) => Promise<Buffer> = async () => Buffer.alloc(0);
   private queue: { buf: Buffer; index: number; threadId: number }[] = [];
   private nowIndex = 0;
   private loadIndex = 0;
@@ -42,8 +42,12 @@ export class AggregationStream extends stream.Readable {
     this.queue[index - this.nowIndex] = { index, buf, threadId };
     this.tryToPush();
   }
-  constructor(chuckCount: number, threadCount: number, callback: AggregationStream["callback"]) {
+  constructor(chuckCount?: number, threadCount?: number, callback?: AggregationStream["callback"]) {
     super();
+    if (chuckCount && threadCount && callback) this.start(chuckCount, threadCount, callback);
+  }
+  public start(chuckCount: number, threadCount: number, callback: AggregationStream["callback"]) {
+    if (this.chuckCount) throw new Error("已经开始了");
     this.chuckCount = chuckCount;
     this.threadCount = Math.min(chuckCount, threadCount);
     this.callback = callback;
