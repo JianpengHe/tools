@@ -32,10 +32,14 @@ export class ShowTransferProgress {
       "平均速度",
       ...this.showSize((this.filesize * 1000) / (now - this.startTime)),
       "/s",
-      "剩余大小",
-      ...this.showSize(this.totalSize - this.filesize),
-      "剩余时间",
-      String((time / 60) | 0).padStart(2, "0") + ":" + String(time % 60).padStart(2, "0"),
+      ...(this.totalSize
+        ? [
+            "剩余大小",
+            ...this.showSize(this.totalSize - this.filesize),
+            "剩余时间",
+            String((time / 60) | 0).padStart(2, "0") + ":" + String(time % 60).padStart(2, "0"),
+          ]
+        : []),
       "\x1B[34m" + this.title + "\x1B[0m"
     );
     this.showedFilesize = this.filesize;

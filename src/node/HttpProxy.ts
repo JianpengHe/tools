@@ -335,7 +335,7 @@ export class HttpProxy {
       });
       console.log("\t");
       console.warn(
-        `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}/，否则不支持HTTPS\x1B[0m`
+        `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}，否则不支持HTTPS\x1B[0m`
       );
 
       if (proxyMode === undefined) {
