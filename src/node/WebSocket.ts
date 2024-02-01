@@ -6,12 +6,12 @@ import { RecvStream } from "./RecvStream";
 import { TypedEventEmitter } from "./utils";
 import { Buf } from "./Buf";
 export enum EWebSocketOpcode {
-  "附加数据帧" = 0,
-  "文本数据帧" = 1,
-  "二进制数据帧" = 2,
-  "连接关闭" = 8,
-  "ping" = 9,
-  "pong" = 10,
+  "Continuation" = 0,
+  "Text" = 1,
+  "Binary" = 2,
+  "Close" = 8,
+  "Ping" = 9,
+  "Pong" = 10,
 }
 export type IWebSocketEvents = {
   connected: () => void;
@@ -99,7 +99,7 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
             },
           });
           if (!this.emit("subStream", subReadable)) {
-            console.warn("未添加subStream事件监听器，websocket的所有stream都会被丢弃");
+            console.warn("Without adding a subStream event listener, all streams of websocket will be discarded!"); // 未添加subStream事件监听器，websocket的所有stream都会被丢弃
             subReadable = undefined;
           }
         }
@@ -107,13 +107,13 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
         /** 如果接收到未知的opcode，接收端必须关闭连接 */
         if (EWebSocketOpcode[recvType] === undefined) {
           this.socket.end();
-          const err = new Error("接收到未知的opcode");
+          const err = new Error("Received unknown opcode"); // 接收到未知的opcode
           if (!this.emit("error", err)) {
             throw err;
           }
           return;
         }
-        if (recvType === EWebSocketOpcode["连接关闭"]) {
+        if (recvType === EWebSocketOpcode["Close"]) {
           this.socket.end();
           return;
         }
@@ -134,7 +134,7 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
         }
         // console.log("recvLen", recvLen, "recvType", recvType);
         if (!recvLen) {
-          if (recvType === EWebSocketOpcode["ping"]) {
+          if (recvType === EWebSocketOpcode["Ping"]) {
             this.emit("ping", Buffer.allocUnsafe(0));
             this.socket.write(Buffer.from([0x8a, 0]));
           }
@@ -165,7 +165,7 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
             // console.log("发送", buf.length);
             canReadPush(buf);
             canReadSize = 0;
-          } else if (recvType === EWebSocketOpcode["文本数据帧"]) {
+          } else if (recvType === EWebSocketOpcode["Text"]) {
             buffersLen += buf.length;
             buffers.push(buf);
             if (buffersLen > Number(this.opts.maxTextSize)) {
@@ -179,9 +179,9 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
               this.socket.end();
               return;
             }
-          } else if (recvType === EWebSocketOpcode["pong"]) {
+          } else if (recvType === EWebSocketOpcode["Pong"]) {
             this.pingCallBacks.get(buf.readUInt32BE())?.();
-          } else if (recvType === EWebSocketOpcode["ping"]) {
+          } else if (recvType === EWebSocketOpcode["Ping"]) {
             this.emit("ping", buf);
             this.socket.write(Buffer.concat([Buffer.from([0x8a, buf.length]), buf]));
           }
@@ -190,10 +190,10 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
           break;
         }
       }
-      if (recvType === EWebSocketOpcode["二进制数据帧"] && canReadPush) {
+      if (recvType === EWebSocketOpcode["Binary"] && canReadPush) {
         canReadPush(null);
         canReadSize = 0;
-      } else if (recvType === EWebSocketOpcode["文本数据帧"]) {
+      } else if (recvType === EWebSocketOpcode["Text"]) {
         this.emit("text", String(Buffer.concat(buffers)));
       }
 

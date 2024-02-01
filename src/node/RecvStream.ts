@@ -202,7 +202,7 @@ export class RecvStream {
         recvStreamQueue.callback(Buffer.alloc(0));
         return;
       }
-      throw new Error("readSize 不能为0");
+      throw new Error("ReadSize cannot be 0"); // readSize 不能为0
     }
 
     if (unshift) {
@@ -257,7 +257,7 @@ export class SubReadStream extends stream.Readable {
         this.consume();
       });
     } else {
-      throw new Error("不科学");
+      throw new Error("It's impossible to see here"); // 不科学
     }
   }
   public _destroy(err, callback) {
