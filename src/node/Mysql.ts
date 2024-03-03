@@ -68,6 +68,7 @@ export enum EMysqlFieldType {
   newdate = 0x0e,
   varchar = 0x0f,
   bit = 0x10,
+  json = 0xf5,
   newdecimal = 0xf6,
   enum = 0xf7,
   set = 0xf8,
@@ -434,13 +435,14 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         case "bit":
         case "decimal":
         case "newdecimal":
+        case "json":
           const len = initLen ?? buf.readIntLenenc();
           if (buf.buffer.length - buf.offset < len) {
             /** 如果已缓存的buffer太短不能满足len，就返回undefined */
             return undefined;
           }
           const buffer = buf.read(len);
-          if (typeStr.includes("string") || typeStr === "var_string" || typeStr === "enum") {
+          if (typeStr.includes("string") || typeStr === "var_string" || typeStr === "enum" || typeStr === "json") {
             return String(buffer);
           }
           return buffer;
