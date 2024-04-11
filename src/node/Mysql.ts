@@ -317,13 +317,24 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     loginBuf.writeUIntLE(res.character_set === "utf8mb4" ? 45 : 33, 1);
     loginBuf.alloc(23, 0);
     loginBuf.writeStringNUL(res.username, loginBuf.offset + 23);
-    const password_sha1 = getHash("sha1", Buffer.from(res.password));
-    const password = Buffer.alloc(password_sha1.length);
-    getHash(
-      "sha1",
-      Buffer.concat([info.auth_plugin_data_part_1, info.auth_plugin_data_part_2, getHash("sha1", password_sha1)])
-    ).forEach((byte, i) => {
-      password[i] = byte ^ password_sha1[i];
+    /** 是否使用MySQL8的caching_sha2_password */
+    const isCachingSha2Password = info.auth_plugin_name === "caching_sha2_password";
+    /** 加密方式 */
+    const algorithm = isCachingSha2Password ? "sha256" : "sha1";
+    /** SHA(password) */
+    const password_sha = getHash(algorithm, Buffer.from(res.password));
+    /** SHA(SHA(password)) */
+    const password_sha_sha = getHash(algorithm, password_sha);
+    /** 拼接顺序 */
+    const sha_list = [info.auth_plugin_data_part_1, info.auth_plugin_data_part_2];
+    if (isCachingSha2Password) {
+      sha_list.unshift(password_sha_sha);
+    } else {
+      sha_list.push(password_sha_sha);
+    }
+    const password = Buffer.alloc(password_sha.length);
+    getHash(algorithm, Buffer.concat(sha_list)).forEach((byte, i) => {
+      password[i] = byte ^ password_sha[i];
     });
     loginBuf.writeUIntLE(password.length, 1);
     loginBuf.write(password);
@@ -332,7 +343,16 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     loginBuf.buffer.writeUIntLE(loginBuf.buffer.length - 4, 0, 3);
     if (this.socket?.readyState === "open") {
       this.socket.write(loginBuf.buffer);
-      const [_, result] = await this.recv();
+      let [_, result] = await this.recv();
+      if (result.length === 2) {
+        if (result[1] === 3) {
+          [_, result] = await this.recv();
+        } else {
+          if (!this.emit("loginError", 0, "caching_sha2_password err")) {
+            throw new Error(`MYSQL Login Error: caching_sha2_password`);
+          }
+        }
+      }
       if (!result || result[0] !== 0) {
         const errNo = result.readUInt16LE(1);
         const errMsg = String(result.subarray(3));
