@@ -5,7 +5,7 @@ export class ShowTransferProgress {
   private totalSize: number;
   private showedFilesize: number;
   private showedTime: number;
-  private timer: NodeJS.Timer;
+  private timer: number;
   constructor(title = "ShowTransferProgress", totalSize = 0, interval = 1000) {
     this.startTime = new Date().getTime();
     this.title = title;
@@ -13,7 +13,7 @@ export class ShowTransferProgress {
     this.totalSize = totalSize;
     this.showedFilesize = 0;
     this.showedTime = this.startTime;
-    this.timer = setInterval(this.setInterval.bind(this), interval);
+    this.timer = Number(setInterval(this.setInterval.bind(this), interval));
   }
   add(filesize: number) {
     this.filesize += filesize;

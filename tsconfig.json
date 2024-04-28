@@ -17,10 +17,8 @@
     "listFiles": true, // 包含了哪些库，这个必要的时候还是很有用的
     "listEmittedFiles": true,
     "declaration": true,
-    "lib": [
-      // 要那些 lib，按需选择即可
-      "es2016"
-    ],
+    "lib": ["ESNext"],
+    "skipLibCheck": true,
     // "noUnusedLocals": true,
     // "noUnusedParameters": true,
     // "noFallthroughCasesInSwitch": true,
