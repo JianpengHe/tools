@@ -308,7 +308,7 @@ export const dnsResolveParse = (msg: Buffer): Required<IDnsResolve> => {
     while ((len = buf.readUIntBE(1))) {
       /** 如果前2位都是1，则使用了压缩 */
       if (len >= 0xc0) {
-        len = (len - 0xc0) * 0xff + buf.readUIntBE(1);
+        len = (len - 0xc0) * 256 + buf.readUIntBE(1);
         /** 先保存下来当前的offset值 */
         const { offset } = buf;
         /** 第一个字节最高两位都是 1，所以只取后14位 */
