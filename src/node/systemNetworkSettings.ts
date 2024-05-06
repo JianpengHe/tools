@@ -5,6 +5,7 @@ import * as tls from "tls";
 import * as crypto from "crypto";
 import { afterExit } from "./afterExit";
 import { Buf } from "./Buf";
+import { RecvStream } from "./RecvStream";
 
 export type IProxyWinOpt = {
   times?: number;
@@ -349,3 +350,81 @@ export const getPhysicalNetworkInterfaces = (
 //     }
 //   )
 //   .end();
+
+export const socks5 = async (
+  target = { host: "www.google.com", port: 80 },
+  proxy = { host: "127.0.0.1", port: 10808 }
+) => {
+  const sock = net.connect({ host: proxy.host, port: proxy.port });
+
+  /** （一）客户端发送的报头 */
+  sock.write(Buffer.from([0x05, 1, 0]));
+
+  /** （二）代理服务器响应的报头 */
+  const recvStream = new RecvStream(sock);
+  const [VER, METHOD] = await recvStream.readBufferSync(2);
+  if (METHOD === 0xff) throw new Error(proxy.host + ":" + proxy.port + "代理服务器拒绝访问");
+  if (METHOD) throw new Error(proxy.host + ":" + proxy.port + "代理服务器需要提供账号密码");
+
+  /** （三）客户端发送需要访问的IP和端口，以及协议 */
+  const buf = new Buf();
+  buf.writeIntLE(5, 1); // VER 版本号，socks5的值为0x05
+  buf.writeIntLE(0x01, 1); // 0x01表示CONNECT请求 0x02表示BIND请求 0x03表示UDP转发
+  buf.writeIntLE(0, 1); // RSV 保留字段，值为0x00
+  switch (true) {
+    /** 0x01表示IPv4地址，DST.ADDR为4个字节 **/
+    case net.isIPv4(target.host):
+      buf.writeIntLE(0x01, 1);
+      buf.write(Buffer.from(target.host.split(".").map(a => Number(a))));
+      break;
+
+    /** 0x04表示IPv6地址，DST.ADDR为16个字节长度 **/
+    case net.isIPv6(target.host):
+      console.log(target);
+      throw new Error("暂不支持IPv6");
+      break;
+
+    /** 0x03表示域名，DST.ADDR是一个可变长度的域名 **/
+    default:
+      buf.writeIntLE(0x03, 1);
+      buf.writeStringPrefix(target.host, length => {
+        buf.writeIntLE(length, 1);
+        return undefined;
+      });
+  }
+  buf.writeIntBE(target.port, 2); // DST.PORT 目标端口，固定2个字节
+  sock.write(buf.buffer);
+
+  /** （四）代理服务器响应 */
+  const [VERSION, RESPONSE, RSV, ADDRESS_TYPE, ip1, ip2, ip3, ip4, port1, port2] = await recvStream.readBufferSync(10);
+  if (RESPONSE) {
+    throw new Error(proxy.host + ":" + proxy.port + "代理服务器错误，错误码:" + RESPONSE);
+    /**
+  0x00：代理服务器连接目标服务器成功
+  0x01：代理服务器故障
+  0x02：代理服务器规则集不允许连接
+  0x03：网络无法访问
+  0x04：目标服务器无法访问（主机名无效）
+  0x05：连接目标服务器被拒绝
+  0x06：TTL已过期
+  0x07：不支持的命令
+  0x08：不支持的目标服务器地址类型
+  0x09 - 0xFF：未分配
+     */
+  }
+  if (ADDRESS_TYPE === 0x04) throw new Error("暂不支持IPv6");
+  // console.log({
+  //   VERSION,
+  //   RESPONSE,
+  //   ADDRESS_TYPE,
+  //   ADDR: `${ip1}.${ip2}.${ip3}.${ip4}`,
+  //   PORT: port1 * 256 + port2,
+  // });
+  return sock;
+};
+
+/** 测试用例 */
+// socks5().then(socks => {
+//   socks.write(`GET / HTTP/1.1\r\nHost: www.google.com\r\n\r\n`);
+//   socks.pipe(process.stdout);
+// });
