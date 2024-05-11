@@ -231,32 +231,36 @@ export const getOccupiedNetworkPortPids = (
 /** 通过通信端口，获取应用名称 */
 export const getProcessNameByPort = (remotePort: number = 0, localPort: number = 0) =>
   new Promise(resolve =>
-    child_process.exec(`netstat -aonp TCP |findstr ":${remotePort}"`, (err, data) => {
-      if (err) {
-        resolve("");
-        return;
-      }
-      const pid = (String(data).match(
-        new RegExp(
-          `TCP\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${remotePort}\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${localPort}\\s+\\S+\\s+(\\d+)`
+    os.platform() === "win32"
+      ? child_process.exec(`netstat -aonp TCP |findstr ":${remotePort}"`, (err, data) => {
+          if (err) {
+            resolve("");
+            return;
+          }
+          const pid = (String(data).match(
+            new RegExp(
+              `TCP\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${remotePort}\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\:${localPort}\\s+\\S+\\s+(\\d+)`
+            )
+          ) || [])[1];
+          if (!pid) {
+            resolve("");
+            return;
+          }
+          child_process.exec(`tasklist /FI "PID eq ${pid}" /NH`, (err, data) =>
+            resolve(
+              (
+                (!err &&
+                  (String(data)
+                    .trim()
+                    .match(new RegExp(`^(.+?)\\s+${pid}`)) || [])[1]) ||
+                ""
+              ).trim()
+            )
+          );
+        })
+      : child_process.exec(`lsof -nP -i :${remotePort}|grep ":${localPort}->"`, (err, data) =>
+          resolve(String(data || "").split(/\s/)[0] || "")
         )
-      ) || [])[1];
-      if (!pid) {
-        resolve("");
-        return;
-      }
-      child_process.exec(`tasklist /FI "PID eq ${pid}" /NH`, (err, data) =>
-        resolve(
-          (
-            (!err &&
-              (String(data)
-                .trim()
-                .match(new RegExp(`^(.+?)\\s+${pid}`)) || [])[1]) ||
-            ""
-          ).trim()
-        )
-      );
-    })
   );
 
 /** 使用Trojan代理协议 */
