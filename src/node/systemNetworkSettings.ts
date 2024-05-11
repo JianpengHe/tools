@@ -198,7 +198,7 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
       await Promise.all(
         networkServices.map(async networkService => {
           try {
-            await childProcessExec(`networksetup -setdnsservers ${networkService} ${addr}`);
+            await childProcessExec(`networksetup -setdnsservers "${networkService}" ${addr}`);
           } catch (e) {
             console.log("自动配置DNS\t\x1B[31m失败\x1B[0m\t", networkService, String(e));
           }
@@ -208,7 +208,7 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
       if (autoReset) {
         afterExit(() => {
           child_process.execSync(
-            networkServices.map(networkService => `networksetup -setdnsservers ${networkService} empty`).join(" & ") +
+            networkServices.map(networkService => `networksetup -setdnsservers "${networkService}" empty`).join(" & ") +
               "& dscacheutil -flushcache"
           );
         });
