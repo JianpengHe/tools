@@ -194,31 +194,34 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
 // setDnsAddr("114.114.114.114")
 
 /** 占用端口的应用pid */
-export const getOccupiedNetworkPortPids = async (
+export const getOccupiedNetworkPortPids = (
   port: number,
   host: string = "0.0.0.0",
   protocol: "TCP" | "UDP" = "TCP"
 ): Promise<number[]> => {
-  if (os.platform() !== "win32") {
-    throw new Error("Microsoft Windows Only!");
-  }
-  return await new Promise((resolve, reject) =>
-    child_process.exec(`netstat -aon -p ${protocol}|findstr "${host}:${port}"`, (err, stdout) => {
+  const cmd =
+    os.platform() === "win32"
+      ? `netstat -aon -p ${protocol}|findstr "${host}:${port}"`
+      : `lsof -nP -i :${port}${protocol === "TCP" ? "|grep LISTEN" : ""}`;
+  return new Promise((resolve, reject) =>
+    child_process.exec(cmd, (err, stdout) => {
+      const regs = [
+        /** 判断ip和端口 */
+        new RegExp(`\\s${host === "0.0.0.0" ? "(\\*|0.0.0.0)" : host}:${port}\\s`),
+        /** 判断协议 */
+        new RegExp(`\\s${protocol}\\s`, "i"),
+        /** 判断状态 */
+        protocol === "TCP" ? /\s(LISTENING|\(LISTEN\))\s/ : /\s/,
+      ];
+      // console.log(cmd, String(stdout || ""));
+
       const pidInfo = String(stdout || "")
         .trim()
-        .split("\n");
-      const pids: number[] = [];
-      if (pidInfo.length) {
-        pidInfo.forEach(line => {
-          const pid = (line.match(
-            new RegExp(`^${protocol}\\s+${host.replace(/\./g, "\\.")}\\:${port}\\s+[^\\d]*(\\d+)$`)
-          ) || [])[1];
-          if (pid) {
-            pids.push(Number(pid));
-          }
-        });
-      }
-      resolve(pids);
+        .split("\n")
+        .filter(line => regs.every(reg => reg.test(` ${line} `)))
+        .map(line => Number((line + " ").match(/\s(\d+)\s/)?.[1] || 0))
+        .filter(Boolean);
+      resolve(pidInfo);
     })
   );
 };
