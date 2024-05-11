@@ -6,6 +6,7 @@ import * as crypto from "crypto";
 import { afterExit } from "./afterExit";
 import { Buf } from "./Buf";
 import { RecvStream } from "./RecvStream";
+import { childProcessExec } from "./utils";
 
 export type IProxyWinOpt = {
   times?: number;
@@ -148,51 +149,78 @@ export class ProxyWin {
 
 /** 设置DNS服务器 */
 export const setDnsAddr = async (addr: string, autoReset = true) => {
-  if (os.platform() !== "win32") {
-    throw new Error("Microsoft Windows Only!");
-  }
-  const names = Object.entries(os.networkInterfaces())
-    .map(([name, infos]) => {
-      if (infos?.find(({ internal, family }) => !internal && family === "IPv4")) {
-        return name;
+  switch (os.platform()) {
+    case "win32":
+      const names = Object.entries(os.networkInterfaces())
+        .map(([name, infos]) => {
+          if (infos?.find(({ internal, family }) => !internal && family === "IPv4")) {
+            return name;
+          }
+          return false;
+        })
+        .filter(a => a);
+      if (autoReset) {
+        afterExit(() => {
+          child_process.execSync(
+            names.map(name => `netsh interface ipv4 set dns name="${name}" source = dhcp`).join(" & ") +
+              "& ipconfig/flushdns & netsh winsock reset"
+          );
+        });
       }
-      return false;
-    })
-    .filter(a => a);
-  if (autoReset) {
-    afterExit(() => {
-      child_process.execSync(
-        names.map(name => `netsh interface ipv4 set dns name="${name}" source = dhcp`).join(" & ") +
-          "& ipconfig/flushdns & netsh winsock reset"
-      );
-    });
-  }
 
-  await Promise.all(
-    names.map(
-      name =>
-        new Promise((resolve, reject) =>
-          child_process.exec(
-            `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY && ipconfig/flushdns`,
-            (err, out) => {
-              if (err) {
-                child_process.execFileSync("cmd", [`/C chcp 65001>nul`]);
-                console.log("自动配置DNS\t\x1B[31m" + out.trim() + "\x1B[0m\t", name);
-                reject(err);
-                return;
-              }
-              // console.log("自动配置DNS", name);
-              resolve(true);
-            }
-          )
+      await Promise.all(
+        names.map(
+          name =>
+            new Promise((resolve, reject) =>
+              child_process.exec(
+                `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY && ipconfig/flushdns`,
+                (err, out) => {
+                  if (err) {
+                    child_process.execFileSync("cmd", [`/C chcp 65001>nul`]);
+                    console.log("自动配置DNS\t\x1B[31m" + out.trim() + "\x1B[0m\t", name);
+                    reject(err);
+                    return;
+                  }
+                  // console.log("自动配置DNS", name);
+                  resolve(true);
+                }
+              )
+            )
         )
-    )
-  );
-  return names;
+      );
+      return names;
+    /** Mac OS */
+    case "darwin":
+      const networkServices = (await childProcessExec("networksetup -listallnetworkservices"))
+        .split("\n")
+        .filter(line => line.trim() && !line.includes("*"));
+
+      await Promise.all(
+        networkServices.map(async networkService => {
+          try {
+            await childProcessExec(`networksetup -setdnsservers ${networkService} ${addr}`);
+          } catch (e) {
+            console.log("自动配置DNS\t\x1B[31m失败\x1B[0m\t", networkService, String(e));
+          }
+        })
+      );
+      await childProcessExec("dscacheutil -flushcache");
+      if (autoReset) {
+        afterExit(() => {
+          child_process.execSync(
+            networkServices.map(networkService => `networksetup -setdnsservers ${networkService} empty`).join(" & ") +
+              "& dscacheutil -flushcache"
+          );
+        });
+      }
+      return networkServices;
+    default:
+      throw new Error("You OS is not supported 'setDnsAddr'");
+  }
 };
 
-// setDnsAddr("114.114.114.114")
-
+// setDnsAddr("114.114.114.114");
+// setTimeout(() => {}, 1000000);
 /** 占用端口的应用pid */
 export const getOccupiedNetworkPortPids = (
   port: number,

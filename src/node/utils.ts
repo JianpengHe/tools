@@ -1,6 +1,7 @@
 import * as stream from "stream";
 import * as events from "events";
 import * as crypto from "crypto";
+import * as child_process from "child_process";
 
 export type IReadStream = stream.Readable | stream.Duplex;
 export const recvAll = (stream: IReadStream): Promise<Buffer> =>
@@ -44,3 +45,15 @@ export function getHash(
 }
 
 export const sleep = (time: number) => new Promise(resolve => setTimeout(resolve, time));
+
+export const childProcessExecIgnoreError = (command: string, options?: child_process.ExecOptions) =>
+  new Promise<string>(resolve =>
+    child_process.exec(command, options || {}, (error, data) => resolve(String(data || "")))
+  );
+
+export const childProcessExec = (command: string, options?: child_process.ExecOptions) =>
+  new Promise<string>((resolve, reject) =>
+    child_process.exec(command, options || {}, (error, stdout, stderr) =>
+      error ? reject(new Error(String(stdout || "") || String(stderr) || String(error))) : resolve(String(stdout || ""))
+    )
+  );
