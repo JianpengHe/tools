@@ -17,7 +17,7 @@ const PATH = "release";
         await readFile(path + "/" + file.name);
         continue;
       }
-      
+
       if (!/\.ts$/.test(file.name)) {
         continue;
       }
@@ -38,20 +38,27 @@ const PATH = "release";
   await readFile("");
   for (const [_, obj] of fileMap) {
     const { name, fileData, rely, sysRely, path } = obj;
+    /** 对于多行导入 */
+    let isMatching = false
     fileData.forEach((line, index) => {
-      const reg = line
+      line = line
         .replace(/'/g, '"')
         .replace(";", "")
         .trim()
-        .match(/^import .*? from "([^"]+)"$/);
-      if (reg && reg[1]) {
-        const mod = reg[1];
+      const matchStart = /^import /.test(line)
+      const matchEnd = line.match(/ from "([^"]+)"$/);
+      if (matchEnd && matchEnd[1]) {
+        const mod = matchEnd[1];
         if (/^\.\//.test(mod)) {
           rely[index] = path + "/" + mod.substring(2) + ".ts";
         } else {
           sysRely.push(mod);
           rely[index] = null;
         }
+        isMatching = false
+      } else if (matchStart || isMatching) {
+        isMatching = true;
+        rely[index] = null;
       }
     });
     [...new Set(rely.filter(a => a))].forEach(otherName => {
