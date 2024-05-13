@@ -1,8 +1,10 @@
 import * as net from "net";
 import * as dns from "dns";
 import * as fs from "fs";
+import * as os from "os";
 import { DnsServer } from "./dnsService";
 import { afterExit } from "./afterExit";
+import { childProcessExec } from "./utils";
 
 const modifyHostsFile = (hostsFile: string[], host: string, ip: string) => {
   let oldIp = "";
@@ -119,6 +121,9 @@ export class TcpProxy {
         this.addQueue.splice(0, 1);
         this.tryToCreateServer();
         return;
+      }
+      if (os.platform() !== "win32" && localIP !== "127.0.0.1") {
+        await childProcessExec(`ifconfig lo0 alias ${localIP} netmask 0xFFFFFFFF`);
       }
       const netServer = net.createServer();
       netServer.on("connection", connectionListener);

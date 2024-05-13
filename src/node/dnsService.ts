@@ -1,6 +1,8 @@
 import * as dns from "dns";
 import * as dgram from "dgram";
 import * as net from "net";
+import * as os from "os";
+import * as child_process from "child_process";
 import { Buf } from "./Buf";
 import { getOccupiedNetworkPortPids, setDnsAddr } from "./systemNetworkSettings";
 
@@ -279,6 +281,9 @@ export class DnsServer {
   constructor(port: number = 53, host: string = "127.0.0.2", autoSettings: boolean = true) {
     if (this.dnsServerIp === host) {
       this.dnsServerIp = "119.29.29.29";
+    }
+    if (os.platform() !== "win32" && host !== "127.0.0.1") {
+      child_process.execSync(`ifconfig lo0 alias ${host} netmask 0xFFFFFFFF`);
     }
     console.log("DNS Server\t", "请注意使用【管理员权限】打开");
     console.log("DNS Server\t", "远程地址", this.dnsServerIp);

@@ -483,30 +483,32 @@ export class HttpProxy {
 }
 
 // 测试用例
-new HttpProxy(["www.baidu.com"]).addProxyRule(
-  (method, url, headers) => true,
-  async function* (localReq) {
-    if (localReq.url.pathname === "/") {
-      // 不对外发请求
-      yield null;
-    } else {
-      // 不修改req
-      yield;
-    }
-    return localReq.url.pathname === "/"
-      ? // 修改为test
-        { body: "test" }
-      : // 不修改res
-        undefined;
-  }
-);
+// new HttpProxy(["www.baidu.com"]).addProxyRule(
+//   (method, url, headers) => true,
+//   async function* (localReq) {
+//     if (localReq.url.pathname === "/") {
+//       // 不对外发请求
+//       yield null;
+//     } else {
+//       // 不修改req
+//       yield;
+//     }
+//     return localReq.url.pathname === "/"
+//       ? // 修改为test
+//         { body: "test" }
+//       : // 不修改res
+//         undefined;
+//   }
+// );
 
+// 测试用例2
+// import { SaveLog } from "./SaveLog";
 // const saveLog = new SaveLog();
 // new HttpProxy(["fanyi.baidu.com", "www.baidu.com"], {
 //   proxyMode: new DnsServer(),
 //   async onNewHost(host) {
 //     console.log("onNewHost", host);
-//     return true;
+//     return false;
 //   },
 // }).addProxyRule(
 //   (method, url, headers) => {
@@ -518,7 +520,7 @@ new HttpProxy(["www.baidu.com"]).addProxyRule(
 //     const remoteRes = yield remoteReq;
 //     console.log(String(remoteRes.body));
 //     const localRes: Partial<IHttpProxyRes> = {
-//       // body: "禁止访问百度",
+//       body: "禁止访问百度",
 //     };
 //     saveLog.add({
 //       localReq: { ...localReq, body: String(localReq.body) },
