@@ -485,7 +485,7 @@ export const getProcessNameByPort = (remotePort: number = 0, localPort: number =
             )
           );
         })
-      : child_process.exec(`lsof -nP -i :${remotePort}|grep ":${localPort}->"`, (err, data) =>
+      : child_process.exec(`lsof -nP -i :${localPort}|grep ":${remotePort}->"`, (err, data) =>
           resolve(String(data || "").split(/\s/)[0] || "")
         )
   );
