@@ -7,7 +7,11 @@ import * as dns from "dns";
 import * as crypto from "crypto";
 import { TcpProxy } from "./TcpProxy";
 import { recvAll } from "./utils";
-import { getProcessNameByPort, ProxyWin } from "./systemNetworkSettings";
+import {
+  EOperatingSystemHttpProxyStatus,
+  getProcessNameByPort,
+  OperatingSystemHttpProxy,
+} from "./systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
 export type IHttpProxyReq = {
   method: string;
@@ -363,17 +367,18 @@ export class HttpProxy {
         /** 如果是普通http proxy，则需要监听端口暴露这个代理服务器 */
         this.proxyServer.listen(opt.proxyBindPort, opt.proxyBindIp);
         if (this.opt.autoSettings) {
-          new ProxyWin(true)
+          new OperatingSystemHttpProxy(true)
             .set({
               proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
-              status: "全部开启",
+              status: EOperatingSystemHttpProxyStatus.使用脚本和代理,
               pac: `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`,
             })
             .then(proxyWin => proxyWin.get())
-            .then(obj => {
+            .then(arr => {
               console.log("已自动帮您修改系统设置：");
-              console.log("代理服务器", obj.proxyIp);
-              console.log("PAC脚本", obj.pac);
+              for (const { proxyIp, pac, networkService } of arr) {
+                console.log(networkService, "代理服务器", proxyIp, "PAC脚本", pac);
+              }
             });
         } else {
           console.log(
@@ -478,6 +483,23 @@ export class HttpProxy {
 }
 
 // 测试用例
+new HttpProxy(["www.baidu.com"]).addProxyRule(
+  (method, url, headers) => true,
+  async function* (localReq) {
+    if (localReq.url.pathname === "/") {
+      // 不对外发请求
+      yield null;
+    } else {
+      // 不修改req
+      yield;
+    }
+    return localReq.url.pathname === "/"
+      ? // 修改为test
+        { body: "test" }
+      : // 不修改res
+        undefined;
+  }
+);
 
 // const saveLog = new SaveLog();
 // new HttpProxy(["fanyi.baidu.com", "www.baidu.com"], {
@@ -508,26 +530,5 @@ export class HttpProxy {
 //     });
 
 //     return localRes;
-//   }
-// );
-
-// new HttpProxy(["www.baidu.com"], {
-//   // proxyMode: "",
-// }).addProxyRule(
-//   (method, url, headers) => true,
-
-//   async function* (localReq) {
-//     if (localReq.url.pathname === "/") {
-//       // 不对外发请求
-//       yield null;
-//     } else {
-//       // 不修改req
-//       yield;
-//     }
-//     return localReq.url.pathname === "/"
-//       ? // 修改为test
-//         { body: "test" }
-//       : // 不修改res
-//         undefined;
 //   }
 // );

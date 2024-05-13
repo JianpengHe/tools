@@ -8,41 +8,112 @@ import { Buf } from "./Buf";
 import { RecvStream } from "./RecvStream";
 import { childProcessExec } from "./utils";
 
-export type IProxyWinOpt = {
+/** 获取MacOS所有network services */
+const getMacOSAllNetworkServices = async () =>
+  (await childProcessExec("networksetup -listallnetworkservices"))
+    .split("\n")
+    .filter(line => line.trim() && !line.includes("*"));
+/**
+ *    x     x      x       1
+ * 自动检测 PAC 代理服务器 固定位
+ */
+export enum EOperatingSystemHttpProxyStatus {
+  "全部禁用" = 0b0001,
+  "全部开启" = 0b1111,
+  "使用代理服务器" = 0b0011,
+  "使用自动脚本" = 0b0101,
+  "使用脚本和代理" = 0b0111,
+  "打开自动检测设置" = 0b1001,
+  "打开自动检测并使用代理" = 0b1011,
+  "打开自动检测并使用脚本" = 0b1101,
+}
+export type IOperatingSystemHttpProxyOpt = {
   times?: number;
-  status?:
-    | "全部开启"
-    | "全部禁用"
-    | "使用代理服务器"
-    | "使用自动脚本"
-    | "使用脚本和代理"
-    | "打开自动检测设置"
-    | "打开自动检测并使用代理"
-    | "打开自动检测并使用脚本";
+  status: EOperatingSystemHttpProxyStatus;
   proxyIp?: string;
   noProxyIps?: string;
   pac?: string;
+  networkService?: string;
 };
 
-/** 查看/设置HTTP代理 */
-export class ProxyWin {
-  private readonly regPath = `"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections" /v DefaultConnectionSettings`;
-  private readonly status = {
-    0x0f: "全部开启",
-    0x01: "全部禁用",
-    0x03: "使用代理服务器",
-    0x05: "使用自动脚本",
-    0x07: "使用脚本和代理",
-    0x09: "打开自动检测设置",
-    0x0b: "打开自动检测并使用代理",
-    0x0d: "打开自动检测并使用脚本",
-  };
-  private autoReset = false;
-  private afterExitBuf?: Buffer;
+/** 工厂函数 */
+class OperatingSystemHttpProxyOptFactory {
+  public readonly name: string;
+  public readonly flag: number;
+  public readonly enabledKey: string = "Enabled";
+  public readonly enabledFlag: string;
+  private doGet: (opt: IOperatingSystemHttpProxyOpt, obj: { [x: string]: string }) => void;
+  public get(opt: IOperatingSystemHttpProxyOpt, raw: string): void {
+    const obj = OperatingSystemHttpProxyOptFactory.MacOSProxyRawToObj(raw);
+    // console.log(this.name, obj);
+    if (this.enabledKey) {
+      if (obj[this.enabledKey] === "On") {
+        opt.status |= this.flag;
+      } else {
+        opt.status ^= this.flag;
+      }
+    }
+    return this.doGet(opt, obj);
+  }
+  private doSet: OperatingSystemHttpProxyOptFactory["set"];
 
-  private getProxyBuf(): Promise<Buffer> {
+  public set(opt: IOperatingSystemHttpProxyOpt): string {
+    const output: string[] = [];
+    const setCMD = this.doSet(opt);
+
+    /** 内容是否对上 */
+    if (setCMD) output.push(`networksetup -set${this.name} "${opt.networkService}" ${setCMD}`);
+
+    /** 开关状态是否对上 */
+    // if (this.isEnabled(opt) !== this.isEnabled(oldOpt))
+    this.enabledFlag &&
+      output.push(`networksetup -set${this.enabledFlag} "${opt.networkService}" ${this.isEnabled(opt) ? "on" : "off"}`);
+
+    return output.join(" & ");
+  }
+  public isEnabled(opt: IOperatingSystemHttpProxyOpt) {
+    return this.flag === 0 ? true : Boolean(opt.status & this.flag);
+  }
+
+  constructor(opt: {
+    name: string;
+    flag: number;
+    enabledKey?: string;
+    get: OperatingSystemHttpProxyOptFactory["doGet"];
+    set: OperatingSystemHttpProxyOptFactory["doSet"];
+    enabledFlag: string;
+  }) {
+    this.name = opt.name;
+    this.flag = opt.flag;
+    this.enabledKey = opt.enabledKey ?? this.enabledKey;
+    this.doGet = opt.get;
+    this.doSet = opt.set;
+    this.enabledFlag = opt.enabledFlag;
+  }
+  private static MacOSProxyRawToObj(raw: string) {
+    const obj: { [x: string]: string } = {};
+    for (const line of raw.trim().split("\n")) {
+      const index = line.indexOf(":");
+      if (index < 0) {
+        obj[line.trim()] = "";
+        continue;
+      }
+      obj[line.substring(0, index).trim()] = line.substring(index + 1).trim();
+    }
+    return obj;
+  }
+}
+/** 查看/设置HTTP代理 */
+export class OperatingSystemHttpProxy {
+  private OS = os.platform();
+  private readonly winRegPath = `"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections" /v DefaultConnectionSettings`;
+
+  private autoReset = false;
+  private afterExitCmd: string = "";
+
+  private getWinProxyBuf(): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      child_process.exec(`REG QUERY ${this.regPath}`, (err, data) => {
+      child_process.exec(`REG QUERY ${this.winRegPath}`, (err, data) => {
         if (!err && data) {
           resolve(
             Buffer.from(
@@ -59,9 +130,9 @@ export class ProxyWin {
     });
   }
 
-  private setProxyBuf(buffer: Buffer): Promise<boolean> {
+  private setWinProxyBuf(buffer: Buffer): Promise<boolean> {
     return new Promise((resolve, reject) => {
-      child_process.exec(`REG add ${this.regPath} /f /t REG_BINARY /d "${buffer.toString("hex")}"`, (err, data) => {
+      child_process.exec(`REG add ${this.winRegPath} /f /t REG_BINARY /d "${buffer.toString("hex")}"`, (err, data) => {
         if (err || !data) {
           reject(err || new Error("no data"));
         } else {
@@ -71,29 +142,27 @@ export class ProxyWin {
     });
   }
 
-  private parse(buffer: Buffer) {
+  private parseWin(buffer: Buffer) {
     const buf = new Buf(buffer);
     if (buf.readUIntLE(4) !== 0x46) {
       throw new Error("解析失败");
     }
-    const out: Required<IProxyWinOpt> = {
+    const out: Required<IOperatingSystemHttpProxyOpt> = {
       times: buf.readUIntLE(4),
-      status: this.status[buf.readUIntLE(4)],
+      status: buf.readUIntLE(4),
       proxyIp: buf.readString(buf.readUIntLE(4)),
       noProxyIps: buf.readString(buf.readUIntLE(4)),
       pac: buf.readString(buf.readUIntLE(4)),
+      networkService: "",
     };
     return out;
   }
 
-  private stringify(newOpt: IProxyWinOpt) {
+  private stringifyWin(newOpt: IOperatingSystemHttpProxyOpt) {
     const buf = new Buf();
     buf.writeUIntLE(0x46, 4);
     buf.writeUIntLE(newOpt.times ?? 0, 4);
-    buf.writeUIntLE(
-      Number((Object.entries(this.status).find(([_, value]) => value === newOpt?.status) || [])[0] || 1),
-      4
-    );
+    buf.writeUIntLE(Number(newOpt?.status), 4);
     buf.writeStringPrefix(newOpt.proxyIp ?? "127.0.0.1:1080", len => {
       buf.writeUIntLE(len, 4);
       return undefined;
@@ -109,42 +178,174 @@ export class ProxyWin {
     buf.write(Buffer.alloc(32));
     return buf.buffer;
   }
+  private static MacOSProxyFormatsCache: {
+    [x: string]: OperatingSystemHttpProxyOptFactory;
+  } | null;
+  private static get MacOSProxyFormats() {
+    return (
+      OperatingSystemHttpProxy.MacOSProxyFormatsCache ||
+      (OperatingSystemHttpProxy.MacOSProxyFormatsCache = {
+        autoproxyurl: new OperatingSystemHttpProxyOptFactory({
+          name: "autoproxyurl",
+          enabledFlag: "autoproxystate",
+          flag: 0b0100,
+          get(opt, { URL }) {
+            opt.pac = URL === "(null)" ? "" : URL;
+          },
+          set(opt) {
+            return opt.pac === undefined ? "" : `"${opt.pac || ""}"`;
+          },
+        }),
+
+        webproxy: new OperatingSystemHttpProxyOptFactory({
+          name: "webproxy",
+          flag: 0b0010,
+          enabledFlag: `webproxystate`,
+          get(opt, { Server, Port }) {
+            opt.proxyIp = Server && Number(Port) ? Server + ":" + Port : "";
+          },
+          set(opt) {
+            return opt.proxyIp === undefined ? "" : (opt.proxyIp || "").replace(":", " ");
+          },
+        }),
+        securewebproxy: new OperatingSystemHttpProxyOptFactory({
+          name: "securewebproxy",
+          enabledFlag: "securewebproxystate",
+          flag: 0b0010,
+          get(opt, { Server, Port }) {
+            opt.proxyIp = Server && Number(Port) ? Server + ":" + Port : "";
+          },
+          set(opt) {
+            return opt.proxyIp === undefined ? "" : (opt.proxyIp || "").replace(":", " ");
+          },
+        }),
+        proxybypassdomains: new OperatingSystemHttpProxyOptFactory({
+          name: "proxybypassdomains",
+          enabledFlag: "",
+          flag: 0,
+          enabledKey: "",
+          get(opt, obj) {
+            opt.noProxyIps = Object.keys(obj).join(";");
+          },
+          set(opt) {
+            return opt.noProxyIps === undefined
+              ? ""
+              : (opt.noProxyIps || "")
+                  .split(";")
+                  .map(host => `"${host}"`)
+                  .join(" ");
+          },
+        }),
+        proxyautodiscovery: new OperatingSystemHttpProxyOptFactory({
+          name: "proxyautodiscovery",
+          enabledFlag: "proxyautodiscovery",
+          flag: 0b1000,
+          enabledKey: "Auto Proxy Discovery",
+          get(opt, obj) {},
+          set(opt) {
+            return "";
+          },
+        }),
+      })
+    );
+  }
+  private getMacOSProxy(networkServices: string[]) {
+    return Promise.all(
+      networkServices.map(async networkService => {
+        const opt: Required<IOperatingSystemHttpProxyOpt> = {
+          times: 0,
+          status: EOperatingSystemHttpProxyStatus.全部禁用,
+          proxyIp: "",
+          noProxyIps: "",
+          pac: "",
+          networkService,
+        };
+
+        await Promise.all(
+          Object.values(OperatingSystemHttpProxy.MacOSProxyFormats).map(async a => {
+            a.get(opt, await childProcessExec(`networksetup -get${a.name} "${networkService}"`));
+          })
+        );
+        return opt;
+      })
+    );
+  }
+  private setMacOSProxyCommand(newOpts: IOperatingSystemHttpProxyOpt[]) {
+    return newOpts
+      .map(opt =>
+        Object.values(OperatingSystemHttpProxy.MacOSProxyFormats)
+          .map(a => a.set(opt))
+          .filter(Boolean)
+          .join(" & ")
+      )
+      .filter(Boolean)
+      .join(" & ");
+  }
   constructor(autoReset = false) {
     if (autoReset) {
       afterExit(() => {
-        if (this.afterExitBuf) {
-          // this.setProxyBuf(this.afterExitBuf);
-          child_process.execSync(`REG add ${this.regPath} /f /t REG_BINARY /d "${this.afterExitBuf.toString("hex")}"`);
-        }
+        // console.log("afterExitCmd", this.afterExitCmd);
+        if (this.afterExitCmd) child_process.execSync(this.afterExitCmd);
       });
     }
     this.autoReset = autoReset;
   }
 
-  public async set(newOpt: IProxyWinOpt) {
-    if (this.autoReset && !this.afterExitBuf) {
-      this.afterExitBuf = await this.getProxyBuf();
+  /** 设置代理，若networkService为空，则代表设置所有网卡 */
+  public async set(newOpt: IOperatingSystemHttpProxyOpt) {
+    switch (this.OS) {
+      case "win32":
+        if (this.autoReset && !this.afterExitCmd) {
+          this.afterExitCmd = `REG add ${this.winRegPath} /f /t REG_BINARY /d "${(await this.getWinProxyBuf()).toString(
+            "hex"
+          )}"`;
+        }
+        await this.setWinProxyBuf(this.stringifyWin(newOpt));
+        break;
+      case "darwin":
+        if (this.autoReset && !this.afterExitCmd) {
+          this.afterExitCmd = this.setMacOSProxyCommand(await this.get());
+        }
+        const opts: IOperatingSystemHttpProxyOpt[] = [];
+        if (newOpt.networkService) {
+          opts.push(newOpt);
+        } else {
+          (await getMacOSAllNetworkServices()).forEach(networkService => opts.push({ ...newOpt, networkService }));
+        }
+
+        const cmd = this.setMacOSProxyCommand(opts);
+        // console.log("set", cmd);
+        cmd && (await childProcessExec(cmd));
+        break;
+      default:
+        throw new Error("You OS is not supported 'OperatingSystemHttpProxy'");
     }
-    await this.setProxyBuf(this.stringify(newOpt));
+
     return this;
   }
-  public async get() {
-    return this.parse(await this.getProxyBuf());
+  /** 获取所有网卡的代理设置 */
+  public async get(networkServices?: string[]) {
+    switch (this.OS) {
+      case "win32":
+        return [this.parseWin(await this.getWinProxyBuf())];
+      case "darwin":
+        return await this.getMacOSProxy(networkServices ?? (await getMacOSAllNetworkServices()));
+      default:
+        throw new Error("You OS is not supported 'OperatingSystemHttpProxy'");
+    }
   }
 }
 
 // (async () => {
-//   const proxyWin = new ProxyWin(true);
-//   console.log(await proxyWin.get());
+//   const operatingSystemHttpProxy = new OperatingSystemHttpProxy(true);
+//   // console.log(await operatingSystemHttpProxy.get());
 //   await new Promise(r => setTimeout(r, 1000));
-//   console.log(
-//     await proxyWin.set({
-//       proxyIp: "127.0.0.1:1080",
-//       status: "使用自动脚本",
-//       pac: "http://127.0.0.1:1080/pg_pac_script_config",
-//     })
-//   );
-//   await new Promise(r => setTimeout(r, 5000));
+//   await operatingSystemHttpProxy.set({
+//     proxyIp: "127.0.0.1:1080",
+//     status: EOperatingSystemHttpProxyStatus.使用脚本和代理,
+//     pac: "http://127.0.0.1:1080/pg_pac_script_config",
+//   });
+//   await new Promise(r => setTimeout(r, 30000));
 // })();
 
 /** 设置DNS服务器 */
@@ -191,9 +392,7 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
       return names;
     /** Mac OS */
     case "darwin":
-      const networkServices = (await childProcessExec("networksetup -listallnetworkservices"))
-        .split("\n")
-        .filter(line => line.trim() && !line.includes("*"));
+      const networkServices = await getMacOSAllNetworkServices();
 
       await Promise.all(
         networkServices.map(async networkService => {
