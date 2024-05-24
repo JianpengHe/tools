@@ -87,7 +87,7 @@ export class AggregationStream extends stream.Readable {
 // const downloadUrl =
 //   "https://f.c2r.ts.cdn.office.net/pr/55336b82-a18d-4dd6-b5f6-9e5095c314a6/Office/Data/16.0.16130.20394/stream.x64.x-none.dat";
 
-// const maxSockets = 10;
+// const maxSockets = 30;
 // /** 每次下载的大小 */
 // const bufferSizePerRes = 1024 * 1024;
 // const agent = new https.Agent({ maxSockets });
@@ -99,7 +99,7 @@ export class AggregationStream extends stream.Readable {
 //   }
 //   const fileName = (String(res.headers["content-disposition"] || "").match(/filename=([^;]+)/) || [])[1] || "data.bin";
 //   /** 显示网速，非必须 */
-//   const showTransferProgress = new ShowTransferProgress(fileName, size);
+//   const showTransferProgress = new ShowTransferProgress(fileName, size, 1000);
 //   console.log("启动服务，共", Math.ceil(size / bufferSizePerRes), "分片");
 //   new AggregationStream(
 //     Math.ceil(size / bufferSizePerRes),

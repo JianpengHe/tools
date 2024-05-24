@@ -1,4 +1,4 @@
-enum EConsole {
+export enum EConsole {
   up,
   down,
   right,
@@ -6,7 +6,7 @@ enum EConsole {
   cleanLineAfter = "\x1b[K",
 }
 
-enum EConsoleStyle {
+export enum EConsoleStyle {
   none = 0,
   /** 加粗（高亮度） */
   Bold = 1,
@@ -95,6 +95,11 @@ export class Console {
 
     this.optimizeAndPrint(out);
     this.lastWriteLines = newLines;
+    return this;
+  }
+  public reset() {
+    this.lastWriteLines.length = 0;
+    return this;
   }
   /** 优化并输出 */
   private optimizeAndPrint(out: Array<EConsole | string>) {
