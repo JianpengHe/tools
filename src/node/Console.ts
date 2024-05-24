@@ -5,13 +5,45 @@ enum EConsole {
   left,
   cleanLineAfter = "\x1b[K",
 }
+
+enum EConsoleStyle {
+  none = 0,
+  /** 加粗（高亮度） */
+  Bold = 1,
+  Faint = 2,
+  Italic = 3,
+  Underline = 4,
+  SlowBlink = 5,
+  RapidBlink = 6,
+  Conceal = 8,
+  CrossedOut = 9,
+
+  black = 30,
+  red = 31,
+  green = 32,
+  yellow = 33,
+  blue = 34,
+  purple = 35,
+  cyan = 36,
+  white = 37,
+
+  blackBackground = 40,
+  redBackground = 41,
+  greenBackground = 42,
+  yellowBackground = 43,
+  blueBackground = 44,
+  purpleBackground = 45,
+  cyanBackground = 46,
+  whiteBackground = 47,
+}
+
 // const logs: string[] = [];
 export class Console {
-  private lastWriteLines: string[] = [];
+  public lastWriteLines: string[] = [];
   public write(str: string) {
     const newLines = str.split("\n");
     const oldLines = this.lastWriteLines;
-    // logs.push(oldLines.join("\n") + "------------" + newLines.join("\n"));
+    // logs.push(oldLines.join("\n") + "------------>" + newLines.join("\n"));
     const out: Array<EConsole | string> = [];
     /** 移到行首 */
     if (oldLines.length) this.toLineStart(oldLines[oldLines.length - 1], out);
@@ -49,10 +81,11 @@ export class Console {
         /** 如果上一行有长度，说明光标在上一行的结尾 */
         if (lastLine.length) {
           this.toLineStart(lastLine, out);
-          out.push(EConsole.cleanLineAfter);
+          //   out.push(EConsole.cleanLineAfter);
         }
+        this.updateLine(oldLines[i], newLines[i], out);
         lastLine = newLines[i];
-        out.push(newLines[i]);
+        // out.push(newLines[i]);
       } else if (i === newLines.length - 1) {
         /** 最后一行完全相同的时候，光标依然停留在“上一个不相同的行”的结尾，所以需要调整 */
         this.toLineStart(newLines[i], out, EConsole.right);
@@ -118,6 +151,40 @@ export class Console {
     for (let i = 0; i < len; i++) out.push(sign);
     // return Console.left(Console.getStringPrintLen(lineData));
   }
+
+  /** 更新一行，请将光标移到本行开头再调本函数 */
+  private updateLine(oldLine: string | undefined, newLine: string, out: Array<EConsole | string>) {
+    if (newLine.includes("\x1b")) {
+      out.push(EConsole.cleanLineAfter);
+      oldLine = undefined;
+    }
+    if (oldLine === undefined) {
+      out.push(newLine);
+      return;
+    }
+    /** 按显示所占的位置展开字符串 */
+    const buildSplit = (str: string) => {
+      const out: string[] = [];
+      for (let i = 0; i < str.length; i++) {
+        /** 当前字符占用的宽度（全角/半角） */
+        const charLen = Console.getCharPrintLen(str, i);
+        for (let n = 0; n < charLen; n++) out.push(n ? str[i] + n : str[i]);
+      }
+      return out;
+    };
+    const oldSplit = buildSplit(oldLine);
+    const newSplit = buildSplit(newLine);
+
+    for (let i = 0; i < newSplit.length; i++) {
+      if (oldSplit[i] === newSplit[i]) {
+        out.push(EConsole.right);
+        continue;
+      }
+      if (newSplit[i].length === 1) out.push(newSplit[i]);
+    }
+
+    if (oldLine.length > newLine.length) out.push(EConsole.cleanLineAfter);
+  }
   /** 获取单字符占用的长度 */
   static getCharPrintLen(str: string, index: number) {
     const codePoint = str.codePointAt(index);
@@ -132,6 +199,7 @@ export class Console {
     }
     return len;
   }
+
   static up(lineCount = 1) {
     return `\x1b[${lineCount}A`;
   }
@@ -144,6 +212,27 @@ export class Console {
   static left(charCount = 1) {
     return `\x1b[${charCount}D`;
   }
+
+  static setColor(...consoleStyles: EConsoleStyle[]) {
+    return `\x1b[${consoleStyles.join(";")}m`;
+  }
+  static setStringColor(str: string, ...consoleStyles: EConsoleStyle[]) {
+    return Console.setColor.apply(this, consoleStyles) + str + Console.setColor(EConsoleStyle.none);
+  }
+
+  static getProgressBar(
+    /** 取值范围0-1 */
+    progress: number,
+    width = 20,
+    doneConsoleStyles: EConsoleStyle[] = [],
+    undoneConsoleStyles: EConsoleStyle[] = []
+  ) {
+    const done = Math.round(width * progress);
+    return (
+      Console.setStringColor("█".repeat(done), EConsoleStyle.green, ...doneConsoleStyles) +
+      Console.setStringColor("█".repeat(width - done), EConsoleStyle.white, ...undoneConsoleStyles)
+    );
+  }
 }
 
 // 测试用例
@@ -151,10 +240,31 @@ export class Console {
 // let p = 100;
 // con.write(`正在下载\nXXX文件`);
 // const timer = setInterval(() => {
-//   if (p-- < 96) {
+//   if ((p -= 1) < 96) {
 //     clearInterval(timer);
 //     // console.log(logs);
 //     return;
 //   }
-//   con.write(`正在下载\nXXX文件\n当前进度${p}%${p > 97 ? "\n请耐心等候\n正在连接" : ""}`);
+//   con.write(
+//     `正在下载\n${p > 98 ? "XXX" : "最牛逼"}文件\n\n\n当前进度${Console.setStringColor(
+//       String(p),
+//       EConsoleStyle.Bold,
+//       p > 98 ? EConsoleStyle.yellowBackground : EConsoleStyle.greenBackground,
+//       EConsoleStyle.red
+//     )}%\n${p > 97 ? "请耐心等候\n正在连接" : ""}`
+//   );
 // }, 1000);
+
+// 测试用例2
+// const con = new Console();
+// let p = 0;
+// con.write(`正在下载\nXXX文件\n请耐心等候`);
+// const timer = setInterval(() => {
+//   if (p++ === 100) {
+//     clearInterval(timer);
+//     return;
+//   }
+//   con.write(
+//     `正在下载\nXXX文件\n${Console.getProgressBar(p / 100, 20, p > 50 ? [EConsoleStyle.red] : [])} ${p}%\n请耐心等候\n`
+//   );
+// }, 100);
