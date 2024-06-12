@@ -41,7 +41,7 @@ export type IHttpProxyOpt = {
   /** 是否自动完成系统设置 */
   autoSettings?: boolean;
 
-  /** 是否显示应用名称（仅win），有轻微性能损耗 */
+  /** 是否显示应用名称，有轻微性能损耗 */
   showProcessName?: boolean;
 
   /** 是否需要代理该域名（beta，只支持系统代理和DNS代理） */
@@ -49,6 +49,9 @@ export type IHttpProxyOpt = {
 
   /** 关闭回环检测（不再添加pg_no_loop_token请求头，可能会导致代理自己请求自己的死循环） */
   disabledLoopCheck?: boolean;
+
+  /** 是否在https模式下仅代理名单（包括onNewHost添加的域名）中的域名，提高性能 */
+  onlyProxyHostInList?: boolean;
 };
 
 const getHostPort = (rawHost: string): [string, number] => {
@@ -88,8 +91,21 @@ export class HttpProxy {
   public readonly routeMap: Map<IHttpProxyRegFn, IHttpProxyFn>;
   /** 对外请求的代理服务器 */
   private readonly opt: IHttpProxyOpt;
+
+  private async onNewHost(hostname: string) {
+    this.hosts.push(hostname);
+    try {
+      this.hostsOriginalIpMap.set(
+        hostname,
+        net.isIPv4(hostname) ? hostname : (await dns.promises.resolve4(hostname))[0] || ""
+      );
+    } catch (e) {
+      console.log("添加失败", hostname, e);
+    }
+  }
   public readonly proxyServer: net.Server = http.createServer(
     async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      // console.log(req.url);
       const encrypted = req.socket["encrypt" + "ed"];
       if (!encrypted && req.url === `/pg_pac_script_config/${this.token}`) {
         console.log(
@@ -155,18 +171,14 @@ export class HttpProxy {
       /** 开发者修改请求的函数 */
       let httpProxyFn: ReturnType<IHttpProxyFn> | undefined = undefined;
       const { proxyMode, onNewHost, proxyBindIp } = this.opt;
-      if (onNewHost && proxyMode === undefined && url.hostname !== proxyBindIp) {
-        if (await onNewHost(url.hostname)) {
-          this.hosts.push(url.hostname);
-          try {
-            this.hostsOriginalIpMap.set(
-              url.hostname,
-              net.isIPv4(url.hostname) ? url.hostname : (await dns.promises.resolve4(url.hostname))[0] || ""
-            );
-          } catch (e) {
-            console.log("添加失败", url.hostname, e);
-          }
-        }
+      if (
+        !encrypted &&
+        onNewHost &&
+        proxyMode === undefined &&
+        url.hostname !== proxyBindIp &&
+        (await onNewHost(url.hostname))
+      ) {
+        await this.onNewHost(url.hostname);
       }
       /** 如果域名在hosts列表中，才交给开发者处理 */
       if (this.hosts.includes(url.hostname)) {
@@ -346,10 +358,25 @@ export class HttpProxy {
         // "httpProxy"
         /** 监听connect方法，一般用做普通代理服务器升级https时，请求建立TLS隧道 */
         this.proxyServer.on("connect", async ({ headers }, socket) => {
-          const [host, _] = getHostPort(headers.host);
+          const [host, port] = getHostPort(headers.host);
+          // console.log("new", host);
           if (host) {
+            if (opt.onNewHost && (await opt.onNewHost(host))) {
+              await this.onNewHost(host);
+            }
+
             /** 先回复一下浏览器：TLS隧道打开啦！！！ */
             socket.write(`HTTP/1.1 200 Connection established\r\n\r\n`);
+            /** 不走代理，直连 */
+            if (opt.onlyProxyHostInList && !this.hostsOriginalIpMap.has(host)) {
+              // console.log("不代理，直连", host);
+              const remoteSock = net.connect({ host, port });
+              remoteSock.on("error", () => socket.end());
+              socket.on("error", () => remoteSock.end());
+              remoteSock.pipe(socket);
+              socket.pipe(remoteSock);
+              return;
+            }
             try {
               this.proxyServer.emit(
                 "connection",
@@ -370,7 +397,9 @@ export class HttpProxy {
           new OperatingSystemHttpProxy(true)
             .set({
               proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
-              status: EOperatingSystemHttpProxyStatus.使用脚本和代理,
+              status: this.opt.onNewHost
+                ? EOperatingSystemHttpProxyStatus.使用代理服务器
+                : EOperatingSystemHttpProxyStatus.使用脚本和代理,
               pac: `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`,
             })
             .then(proxyWin => proxyWin.get())
@@ -532,5 +561,31 @@ export class HttpProxy {
 //     });
 
 //     return localRes;
+//   }
+// );
+
+// 测试用例3 不代理走直连
+// new HttpProxy(["www.baidu.com"], {
+//   // proxyMode: new DnsServer(),
+//   onlyProxyHostInList: true,
+//   async onNewHost(host) {
+//     // console.log(host);
+//     return /baidu\.com$/.test(host);
+//   },
+// }).addProxyRule(
+//   (method, url, headers) => true,
+//   async function* (localReq) {
+//     if (localReq.url.pathname === "/") {
+//       // 不对外发请求
+//       yield null;
+//     } else {
+//       // 不修改req
+//       yield;
+//     }
+//     return localReq.url.pathname === "/"
+//       ? // 修改为test
+//         { body: "test" }
+//       : // 不修改res
+//         undefined;
 //   }
 // );
