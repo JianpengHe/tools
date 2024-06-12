@@ -74,6 +74,9 @@ export type IHttpProxyOpt = {
 
   /** 是否在https模式下仅代理名单（包括onNewHost添加的域名）中的域名，提高性能 */
   onlyProxyHostInList?: boolean; // false
+
+  /** 本代理对外的请求是否使用系统设置的代理。在DnsServer模式下会有一点小问题，正在解决 */
+  useSystemProxy?: boolean; // false
 };
 
 const getHostPort = (rawHost: string): [string, number] => {
@@ -256,14 +259,28 @@ export class HttpProxy {
         }
       }
 
+      const requestOptions: https.RequestOptions = {
+        method: httpProxyReq.method,
+        headers: httpProxyReq.headers,
+        // allow legacy server
+        secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+      };
+
+      /** 如果需要走系统代理 */
+      if (this.initialOperatingSystemHttpProxys) {
+        requestOptions.createConnection = ({ host }, oncreate: (err: Error | null, socket: net.Socket) => void) => {
+          host = httpProxyReq.headers?.host || host || "";
+          const port = Number(httpProxyReq.url.port || (url.protocol === "https:" ? 443 : 80));
+          this.operatingSystemHttpProxy
+            .getHttpProxySocket(host, port, this.initialOperatingSystemHttpProxys)
+            .then(socket => oncreate(null, encrypted ? tls.connect({ servername: host, socket }) : socket));
+          return undefined;
+        };
+      }
+
       const remoteReq = (url.protocol === "https:" ? https : http).request(
         httpProxyReq.url,
-        {
-          method: httpProxyReq.method,
-          headers: httpProxyReq.headers,
-          // allow legacy server
-          secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
-        },
+        requestOptions,
         async remoteRes => {
           /** 需要走拦截 */
           if (httpProxyFn) {
@@ -331,6 +348,12 @@ export class HttpProxy {
     }
   );
 
+  /** 系统代理设置 */
+  private readonly operatingSystemHttpProxy: OperatingSystemHttpProxy;
+
+  /** 最开始的系统代理规则 */
+  private initialOperatingSystemHttpProxys?: Awaited<ReturnType<OperatingSystemHttpProxy["get"]>>;
+
   constructor(hosts: string[], opt: IHttpProxyOpt = {}, certificateCenter = "https://tool.hejianpeng.cn/certificate/") {
     this.hosts = hosts || [];
     this.routeMap = opt?.routeMap || new Map();
@@ -343,6 +366,14 @@ export class HttpProxy {
     this.opt = opt;
     this.certificateCenter = new URL(certificateCenter);
     this.proxyServer.once("error", console.error);
+    this.operatingSystemHttpProxy = new OperatingSystemHttpProxy(opt.autoSettings);
+    /** 如果需要使用系统代理，就要先保存最开始的系统代理规则 */
+    if (opt.useSystemProxy) {
+      this.operatingSystemHttpProxy.get().then(opt => {
+        this.initialOperatingSystemHttpProxys = opt;
+      });
+    }
+
     Promise.all(
       hosts.map(
         host =>
@@ -401,8 +432,14 @@ export class HttpProxy {
             socket.write(`HTTP/1.1 200 Connection established\r\n\r\n`);
             /** 不走代理，直连 */
             if (opt.onlyProxyHostInList && !this.hostsOriginalIpMap.has(host)) {
-              // console.log("不代理，直连", host);
-              const remoteSock = net.connect({ host, port });
+              console.log("不解包，直接转发", host, port);
+              const remoteSock = this.initialOperatingSystemHttpProxys
+                ? await this.operatingSystemHttpProxy.getHttpProxySocket(
+                    host,
+                    port,
+                    this.initialOperatingSystemHttpProxys
+                  )
+                : net.connect({ host, port });
               remoteSock.on("error", () => socket.end());
               socket.on("error", () => remoteSock.end());
               remoteSock.pipe(socket);
@@ -426,7 +463,7 @@ export class HttpProxy {
         /** 如果是普通http proxy，则需要监听端口暴露这个代理服务器 */
         this.proxyServer.listen(opt.proxyBindPort, opt.proxyBindIp);
         if (this.opt.autoSettings) {
-          new OperatingSystemHttpProxy(true)
+          this.operatingSystemHttpProxy
             .set({
               proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
               status: this.opt.onNewHost
@@ -605,21 +642,17 @@ export class HttpProxy {
 // 测试用例3 不代理走直连
 // new HttpProxy(["www.baidu.com"], {
 //   // proxyMode: new DnsServer(),
+//   useSystemProxy: true,
 //   onlyProxyHostInList: true,
 //   async onNewHost(host) {
-//     // console.log(host);
-//     return /baidu\.com$/.test(host);
+//     console.log(host);
+//     return /baidu\.com$/.test(host) || host.includes("translate.google.com");
 //   },
 // }).addProxyRule(
 //   (method, url, headers) => true,
 //   async function* (localReq) {
-//     if (localReq.url.pathname === "/") {
-//       // 不对外发请求
-//       yield null;
-//     } else {
-//       // 不修改req
-//       yield;
-//     }
+//     const a = yield {};
+
 //     return localReq.url.pathname === "/"
 //       ? // 修改为test
 //         { body: "test" }
