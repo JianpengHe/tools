@@ -13,45 +13,67 @@ import {
   OperatingSystemHttpProxy,
 } from "./systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
+
+/** 客户端（浏览器）发送的请求，还没有到达目标服务器前 */
 export type IHttpProxyReq = {
+  /** 模式，常见是GET、POST */
   method: string;
+  /** url */
   url: URL;
+  /** 请求头 */
   headers: http.IncomingHttpHeaders;
+  /** 请求的正文部分 */
   body?: Buffer;
 };
+
+/** 目标服务器的响应，还没有到达客户端（浏览器）之前 */
 export type IHttpProxyRes = {
+  /** 状态码，常见是200、404 */
   code: number;
+  /** 响应头 */
   headers: http.IncomingHttpHeaders;
+  /** 响应的正文部分 */
   body?: Buffer | string;
 };
+
+/** 根据代理规则匹配成功后，处理和篡改请求或响应的回调函数 */
 export type IHttpProxyFn = (
   localReq: IHttpProxyReq
 ) => AsyncGenerator<Partial<IHttpProxyReq> | null | undefined, Partial<IHttpProxyRes> | undefined, IHttpProxyRes>;
+
+/** 代理规则，返回一个布尔值代表这个请求是否需要拦截 */
 export type IHttpProxyRegFn = (method: string, url: URL, headers: http.IncomingHttpHeaders) => boolean;
 
 export type IHttpProxyOpt = {
   /** 接受DnsServer对象、host文件地址，不传默认httpProxy模式 */
-  proxyMode?: TcpProxy["dnsMode"];
+  proxyMode?: TcpProxy["dnsMode"]; // undefined
+
   /** dnsMode为httpProxy时，代表【代理服务器】的地址，当dnsMode为DnsServer对象时，代表【中转服务器】地址（而不是使用127.xx.xx.xx，方便其他终端调试） */
   proxyBindIp?: string; // "127.0.0.1"
+
+  /** 同上，代理服务器或中转服务器的端口 */
   proxyBindPort?: number; // 1080
-  listenRequestPorts?: number[]; //[80,443]
+
+  /** 需要本代理支持哪些目标网站的端口，httpProxy模式下忽略该参数 */
+  listenRequestPorts?: number[]; // [80,443]
+
+  /** 代理规则表，addProxyRule的批量版本，一般情况下不需要填 */
   routeMap?: Map<IHttpProxyRegFn, IHttpProxyFn>;
 
   /** 是否自动完成系统设置 */
-  autoSettings?: boolean;
+  autoSettings?: boolean; // true
 
   /** 是否显示应用名称，有轻微性能损耗 */
-  showProcessName?: boolean;
+  showProcessName?: boolean; // true
 
   /** 是否需要代理该域名（beta，只支持系统代理和DNS代理） */
-  onNewHost?: (host: string) => Promise<boolean>;
+  onNewHost?: (host: string) => Promise<boolean>; // undefined
 
   /** 关闭回环检测（不再添加pg_no_loop_token请求头，可能会导致代理自己请求自己的死循环） */
-  disabledLoopCheck?: boolean;
+  disabledLoopCheck?: boolean; // false
 
   /** 是否在https模式下仅代理名单（包括onNewHost添加的域名）中的域名，提高性能 */
-  onlyProxyHostInList?: boolean;
+  onlyProxyHostInList?: boolean; // false
 };
 
 const getHostPort = (rawHost: string): [string, number] => {
@@ -62,6 +84,7 @@ const getHostPort = (rawHost: string): [string, number] => {
 export class HttpProxy {
   /** 使用PG的公共证书签发平台 */
   private readonly certificateCenter: URL;
+
   /** 获取SSL证书 */
   private readonly createSecureContext = async (host: string): Promise<tls.SecureContext> =>
     new Promise((resolve, reject) => {
@@ -76,10 +99,13 @@ export class HttpProxy {
         })
         .once("error", reject);
     });
+
   /** 需要代理哪些域名 */
   private readonly hosts: string[];
+
   /** 这些域名对应的初始IP */
   private readonly hostsOriginalIpMap: Map<string, string> = new Map();
+
   /** 唯一标志 */
   public readonly token = (o => {
     while (o.length < 40) {
@@ -87,11 +113,14 @@ export class HttpProxy {
     }
     return o;
   })("");
+
   /** 代理规则哈希表 */
   public readonly routeMap: Map<IHttpProxyRegFn, IHttpProxyFn>;
+
   /** 对外请求的代理服务器 */
   private readonly opt: IHttpProxyOpt;
 
+  /** 当遇到新域名时 */
   private async onNewHost(hostname: string) {
     this.hosts.push(hostname);
     try {
@@ -103,6 +132,8 @@ export class HttpProxy {
       console.log("添加失败", hostname, e);
     }
   }
+
+  /** 本地代理服务器 */
   public readonly proxyServer: net.Server = http.createServer(
     async (req: http.IncomingMessage, res: http.ServerResponse) => {
       // console.log(req.url);
@@ -299,6 +330,7 @@ export class HttpProxy {
       );
     }
   );
+
   constructor(hosts: string[], opt: IHttpProxyOpt = {}, certificateCenter = "https://tool.hejianpeng.cn/certificate/") {
     this.hosts = hosts || [];
     this.routeMap = opt?.routeMap || new Map();
@@ -504,8 +536,14 @@ export class HttpProxy {
       }
     });
   }
-  /** 添加代理规则，接受2个函数参数，第一个函数要同步返回一个Boolean代表是否使用代理，第二个函数是对代理的req和res进行修改 */
-  public addProxyRule(regFn: IHttpProxyRegFn, fn: IHttpProxyFn) {
+
+  /** 添加代理规则，接受2个函数参数 */
+  public addProxyRule(
+    /** 同步返回一个Boolean代表是否使用代理 */
+    regFn: IHttpProxyRegFn,
+    /** 对代理的req和res进行怎样的修改 */
+    fn: IHttpProxyFn
+  ) {
     this.routeMap.set(regFn, fn);
     return this;
   }
