@@ -1,5 +1,6 @@
 import * as child_process from "child_process";
 import * as os from "os";
+import * as http from "http";
 import * as net from "net";
 import * as tls from "tls";
 import * as crypto from "crypto";
@@ -333,6 +334,32 @@ export class OperatingSystemHttpProxy {
       default:
         throw new Error("You OS is not supported 'OperatingSystemHttpProxy'");
     }
+  }
+
+  /** 返回代理后的socket，不支持PAC脚本 */
+  public async getHttpProxySocket(
+    host: string,
+    port: number,
+    operatingSystemHttpProxyOpts?: Required<IOperatingSystemHttpProxyOpt>[]
+  ) {
+    const { proxyIp } =
+      (operatingSystemHttpProxyOpts ?? (await this.get())).find(
+        ({ proxyIp, status }) => (status & EOperatingSystemHttpProxyStatus.使用代理服务器) >> 1 && proxyIp
+      ) ?? {};
+
+    if (!proxyIp) return net.connect({ host, port });
+    return await new Promise<net.Socket>(r => {
+      http
+        .request({
+          port: Number(proxyIp.split(":")[1] || "1080"),
+          host: proxyIp.split(":")[0],
+          method: "CONNECT",
+          path: host + ":" + port,
+        })
+        .on("connect", (_, socket) => r(socket))
+        .on("error", () => r(net.connect({ host, port })))
+        .end();
+    });
   }
 }
 
