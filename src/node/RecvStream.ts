@@ -3,11 +3,11 @@ import { IReadStream } from "./utils";
 
 export type IRecvStreamReadBuffer = (
   readSize: number | ((byte: number) => boolean),
-  callback: (buffer: Buffer) => void
+  callback: (buffer?: Buffer) => void
 ) => void;
 export type IRecvStreamReadStream = (
   readSize: number,
-  callback: (stream: SubReadStream) => void,
+  callback: (stream?: SubReadStream) => void,
   onClose?: () => void
 ) => void;
 type IRecvStreamQueueBuffer = {
@@ -83,6 +83,7 @@ export class RecvStream {
     }
   }
   private read() {
+    // console.log("read", this.bufferRemainSize, this.tempBufferSize, this.task);
     /** 当前读取到的字节数没有满足开发者的需求 */
     if (this.bufferRemainSize > this.tempBufferSize) {
       if (!this.sourceStream.readableFlowing) {
@@ -100,11 +101,12 @@ export class RecvStream {
     /** buffer数组合并成一个大块，并且放在数组第0位 */
     if (this.tempBuffer.length > 0) {
       this.tempBuffer[0] = Buffer.concat([...this.tempBuffer]);
-      //  this.tempBuffer.length = 1;
+      // this.tempBuffer.length = 1;
     }
     const buffer = this.tempBuffer[0];
     if (this.task) {
       const task = this.task as IRecvStreamQueueBuffer;
+      // console.log("this.tempBuffer", this.tempBuffer);
       if (task.readSize instanceof Function) {
         /** 只遍历最后一次获取到的内存块 */
         for (const byte of this.tempBuffer[this.tempBuffer.length - 1]) {
@@ -144,25 +146,33 @@ export class RecvStream {
   constructor(sourceStream: IReadStream) {
     this.sourceStream = sourceStream;
     sourceStream.pause();
+    sourceStream.once("close", () => {
+      /** 清空等待任务，返回空 */
+      while (this.task) {
+        this.task.callback(undefined);
+        this.task = this.taskQueue.pop();
+      }
+    });
   }
 
   /** readBuffer的“同步”写法 */
   public readBufferSync: (
     readSize: number | ((byte: number) => boolean),
     unshift?: boolean
-  ) => Promise<Buffer> | Buffer = (readSize, unshift = false) => {
+  ) => Promise<Buffer | undefined> | Buffer = (readSize, unshift = false) => {
     if (this.tempBuffer.length > 0) {
       this.tempBuffer[0] = Buffer.concat([...this.tempBuffer]);
       this.tempBuffer.length = 1;
     }
-    if (readSize instanceof Function) {
-      const index = this.tempBuffer[0].findIndex(readSize);
-      if (index >= 0) {
+    const buffer = this.tempBuffer[0];
+    if (buffer && readSize instanceof Function) {
+      const index = buffer.findIndex(readSize);
+      if (index > 0) {
         readSize = index;
       }
     }
-    if (!(readSize instanceof Function) && this.tempBufferSize >= readSize) {
-      const buffer = this.tempBuffer[0];
+    // console.log("readBufferSync", readSize);
+    if (buffer && !(readSize instanceof Function) && this.tempBufferSize >= readSize) {
       this.tempBuffer[0] = buffer.subarray(readSize);
       this.tempBufferSize = this.tempBuffer[0].length;
       return buffer.subarray(0, readSize);
@@ -199,12 +209,12 @@ export class RecvStream {
   private addNewTask(recvStreamQueue: IRecvStreamQueue, unshift = false) {
     if (!recvStreamQueue.readSize) {
       if (recvStreamQueue.type === "buffer") {
+        // console.log("返回空");
         recvStreamQueue.callback(Buffer.alloc(0));
         return;
       }
       throw new Error("ReadSize cannot be 0"); // readSize 不能为0
     }
-
     if (unshift) {
       this.taskQueue.unshift(recvStreamQueue);
     } else {
