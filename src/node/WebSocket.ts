@@ -80,6 +80,10 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
         /** 接收前2个字节 */
         const headBufPo = this.recvStream.readBufferSync(2);
         const headBuf = headBufPo instanceof Promise ? await headBufPo : headBufPo;
+        if (!headBuf) {
+          this.socket.end();
+          throw new Error("读取头部失败");
+        }
         const flag = headBuf[0];
         const recvIsEnd = flag >= 128;
         let needReadMask = false;
@@ -125,12 +129,22 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
         recvLen %= 128;
         if (recvLen > 125) {
           const lenBufPo = this.recvStream.readBufferSync(recvLen === 126 ? 2 : 8);
-          recvLen = [...(lenBufPo instanceof Promise ? await lenBufPo : lenBufPo)].reduce((a, b) => a * 256 + b);
+          const lenBuffer = lenBufPo instanceof Promise ? await lenBufPo : lenBufPo;
+          if (!lenBuffer) {
+            this.socket.end();
+            throw new Error("读取长度失败");
+          }
+          recvLen = [...lenBuffer].reduce((a, b) => a * 256 + b);
         }
 
         if (needReadMask) {
           const maskBufPo = this.recvStream.readBufferSync(4);
-          recvMask = [...(maskBufPo instanceof Promise ? await maskBufPo : maskBufPo)];
+          const maskBuffer = maskBufPo instanceof Promise ? await maskBufPo : maskBufPo;
+          if (!maskBuffer) {
+            this.socket.end();
+            throw new Error("读取needReadMask失败");
+          }
+          recvMask = [...maskBuffer];
         }
         // console.log("recvLen", recvLen, "recvType", recvType);
         if (!recvLen) {
@@ -154,6 +168,10 @@ export class WebSocket extends TypedEventEmitter<IWebSocketEvents> {
           }
           const bufPo = this.recvStream.readBufferSync(nowReadSize);
           const buf = bufPo instanceof Promise ? await bufPo : bufPo;
+          if (!buf) {
+            this.socket.end();
+            throw new Error("读取body失败");
+          }
           buf.forEach((_, i) => {
             buf[i] ^= recvMask[recvMaskIndex++];
             recvMaskIndex %= 4;

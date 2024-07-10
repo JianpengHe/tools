@@ -266,12 +266,17 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     }
     const headBuf = this.readSocket.readBufferSync(4);
     const head = headBuf instanceof Promise ? await headBuf : headBuf;
+    /** 连接断开 */
+    if (!head) return;
     const len = head.readUIntLE(0, 3);
     if (!len) {
       return [head];
     }
-    const data = this.readSocket.readBufferSync(len);
-    return [head, data instanceof Promise ? await data : data];
+    const dataBuf = this.readSocket.readBufferSync(len);
+    const data = dataBuf instanceof Promise ? await dataBuf : dataBuf;
+    /** 连接断开 */
+    if (!data) return;
+    return [head, data];
   }
   private dateToString(date: Date) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(
@@ -283,6 +288,9 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
   }
   private async login() {
     const handshakeRawBuf = await this.recv();
+    if (!handshakeRawBuf) {
+      throw new Error("Disconnect");
+    }
     if (!handshakeRawBuf[1]) {
       throw new Error("no login info");
     }
@@ -343,10 +351,22 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
     loginBuf.buffer.writeUIntLE(loginBuf.buffer.length - 4, 0, 3);
     if (this.socket?.readyState === "open") {
       this.socket.write(loginBuf.buffer);
-      let [_, result] = await this.recv();
+      let recvBufs: Buffer[] | undefined;
+      let result: Buffer;
+      if (!(recvBufs = await this.recv())) {
+        /** 连接断开 */
+        throw new Error("Disconnect");
+      }
+
+      result = recvBufs[1];
+
       if (result.length === 2) {
         if (result[1] === 3) {
-          [_, result] = await this.recv();
+          if (!(recvBufs = await this.recv())) {
+            /** 连接断开 */
+            throw new Error("Disconnect");
+          }
+          result = recvBufs[1];
         } else {
           if (!this.emit("loginError", 0, "caching_sha2_password err")) {
             throw new Error(`MYSQL Login Error: caching_sha2_password`);
@@ -395,6 +415,11 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
         while (1) {
           const headBuf = this.readSocket.readBufferSync(4);
           const head = headBuf instanceof Promise ? await headBuf : headBuf;
+          if (!head) {
+            /** 连接断开 */
+            reject(new Error("Disconnect"));
+            return;
+          }
           len = head.readUIntLE(0, 3);
           if (!len) {
             reject(new Error("pid: no len?"));
@@ -650,6 +675,11 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
       while (1) {
         const headBuf = this.readSocket.readBufferSync(4);
         const head = headBuf instanceof Promise ? await headBuf : headBuf;
+        if (!head) {
+          /** 连接断开 */
+          callback(new Error("Disconnect"));
+          return;
+        }
         len = head.readUIntLE(0, 3);
         if (!len) {
           callback(new Error("no len?"));

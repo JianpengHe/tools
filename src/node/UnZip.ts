@@ -121,7 +121,11 @@ export class UnZip {
       }
       return;
     }
-    this.recvStream.readBuffer(1, ([sign]) => {
+    this.recvStream.readBuffer(1, buf => {
+      if (!buf) {
+        throw new Error("可读流中断了，无法读标识");
+      }
+      const sign = buf[0];
       let newType = type;
       if (index === 2) {
         for (let i = 0; i < this.zipFileHead.length; i++) {
@@ -170,6 +174,9 @@ export class UnZip {
 
         /** 读取Extra field */
         this.recvStream.readBuffer(info.extraFieldLength, extraBuf => {
+          if (!extraBuf) {
+            throw new Error("可读流中断了，无法读拓展区");
+          }
           info.extraField = extraBuf;
 
           /** 读取文件操作时间信息 */
@@ -231,6 +238,9 @@ export class UnZip {
             if (info.compressedSize) {
               this.recvStream.readStream(info.compressedSize, fileStream => {
                 if (info.compressionMethod === 8 || info.compressionMethod === 9) {
+                  if (!fileStream) {
+                    throw new Error("可读流中断了，无法解压缩数据正文");
+                  }
                   info.fileRecvStream = fileStream.pipe(zlib.createInflateRaw());
                 } else {
                   info.fileRecvStream = fileStream;
