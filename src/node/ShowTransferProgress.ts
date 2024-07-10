@@ -5,6 +5,7 @@ export enum EShowTransferProgressDisplay {
   进度条,
   剩余大小,
   剩余时间,
+  预估时间,
   文件名,
 }
 export type IShowTransferProgressOpt = {
@@ -20,8 +21,8 @@ export class ShowTransferProgress {
   private showedFilesize = 0;
   private showedTime: number;
   private timer: number;
-  private opt: Required<IShowTransferProgressOpt>;
-  constructor(opt: IShowTransferProgressOpt) {
+  public opt: Required<IShowTransferProgressOpt>;
+  constructor(opt: IShowTransferProgressOpt = {}) {
     opt.console = opt.console ?? new Console();
     opt.display =
       opt.display ??
@@ -32,6 +33,7 @@ export class ShowTransferProgress {
             EShowTransferProgressDisplay.进度条,
             EShowTransferProgressDisplay.剩余大小,
             EShowTransferProgressDisplay.剩余时间,
+            EShowTransferProgressDisplay.预估时间,
             EShowTransferProgressDisplay.文件名,
           ]
         : [
@@ -42,37 +44,62 @@ export class ShowTransferProgress {
     this.opt = {
       title: "ShowTransferProgress",
       totalSize: 0,
-      interval: 0,
+      interval: 1000,
       ...opt,
     } as Required<IShowTransferProgressOpt>;
     this.showedTime = this.startTime;
-    this.timer = Number(setInterval(this.setInterval.bind(this), opt.interval ?? 1000));
+
+    /** 如果opt.interval不为0，则开启自动循环显示 */
+    if (opt.interval !== 0) {
+      this.timer = Number(setInterval(this.updateTransferProgressDisplay.bind(this), opt.interval));
+    } else {
+      this.timer = 0;
+    }
   }
+
+  /** 追加大小 */
   public add(filesize: number) {
     this.filesize += filesize;
+    this.update();
+  }
+
+  /** 设置已完成的大小 */
+  public set(filesize: number) {
+    this.filesize = filesize;
+    this.update();
+  }
+
+  private update() {
     if (this.opt.totalSize === this.filesize) {
       this.end();
     }
+    /** 如果opt.interval为0，则每次增加数据都同步显示到控制台 */
+    if (this.opt.interval === 0) {
+      this.updateTransferProgressDisplay();
+    }
   }
-  private setInterval() {
+
+  public updateTransferProgressDisplay() {
     const now = new Date().getTime();
     const speed = ((this.filesize - this.showedFilesize) * 1000) / (now - this.showedTime);
-    const time = Math.ceil((this.opt.totalSize - this.filesize) / speed);
+    /** 平均速度 */
+    const avgSpeed = (this.filesize * 1000) / (now - this.startTime);
+    /** 剩余大小 */
+    const remainingSize = Math.max(0, this.opt.totalSize - this.filesize);
+    /** 进度，取值范围0-1 */
+    const progress = this.opt.totalSize === 0 ? 0 : this.filesize / this.opt.totalSize;
+
+    const formatTime = (speed: number, time: number) =>
+      speed ? `${String((time / 60) | 0).padStart(2, "0")}:${String(time % 60).padStart(2, "0")}` : "--:--";
     const showTransferProgressDisplay: { [x in EShowTransferProgressDisplay]: () => string } = {
       [EShowTransferProgressDisplay.瞬间速度]: () => `瞬间速度 ${ShowTransferProgress.showSize(speed)}/s`,
-      [EShowTransferProgressDisplay.平均速度]: () =>
-        `平均速度 ${ShowTransferProgress.showSize((this.filesize * 1000) / (now - this.startTime))}/s`,
+      [EShowTransferProgressDisplay.平均速度]: () => `平均速度 ${ShowTransferProgress.showSize(avgSpeed)}/s`,
       [EShowTransferProgressDisplay.进度条]: () =>
-        `${Console.getProgressBar(this.filesize / this.opt.totalSize)} ${(
-          (this.filesize * 100) /
-          this.opt.totalSize
-        ).toFixed(2)}%`,
-      [EShowTransferProgressDisplay.剩余大小]: () =>
-        `剩余大小 ${ShowTransferProgress.showSize(this.opt.totalSize - this.filesize)}`,
-      [EShowTransferProgressDisplay.剩余时间]: () =>
-        `剩余时间 ${speed ? String((time / 60) | 0).padStart(2, "0") : "--"}:${
-          speed ? String(time % 60).padStart(2, "0") : "--"
-        }`,
+        `${Console.getProgressBar(progress)} ${(progress * 100).toFixed(2)}%`,
+      [EShowTransferProgressDisplay.剩余大小]: () => `剩余大小 ${ShowTransferProgress.showSize(remainingSize)}`,
+      [EShowTransferProgressDisplay.剩余时间]: () => `剩余时间 ${formatTime(speed, Math.ceil(remainingSize / speed))}`,
+      [EShowTransferProgressDisplay.预估时间]: () =>
+        `预估时间 ${formatTime(avgSpeed, Math.ceil(remainingSize / avgSpeed))}`,
       [EShowTransferProgressDisplay.文件名]: () => Console.setStringColor(" " + this.opt.title, EConsoleStyle.blue),
     };
     // const writeText=
@@ -85,8 +112,8 @@ export class ShowTransferProgress {
     this.showedTime = now;
   }
   public end() {
-    clearInterval(this.timer);
-    this.setInterval();
+    this.timer && clearInterval(this.timer);
+    this.updateTransferProgressDisplay();
     this.opt.console.reset();
   }
   static showSize(byte: number) {
