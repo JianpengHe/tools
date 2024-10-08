@@ -83,7 +83,7 @@ export class TcpProxy {
     this.createServerLock = true;
     const { host, port, connectionListener, localIPStartPos, resolve, reject } = this.addQueue[0];
     try {
-      const ip = net.isIPv4(host) ? host : (await dns.promises.resolve4(host))[0];
+      const ip = net.isIPv4(host) ? host : host === "localhost" ? "127.0.0.1" : (await dns.promises.resolve4(host))[0];
       const localIPNumber =
         (localIPStartPos || this.routeMap.get(ip) || this.lastSuccessIP + (localIPStartPos === 0 ? 0 : 1)) + err;
       const errFn = e => {

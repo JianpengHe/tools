@@ -73,7 +73,14 @@ sock.on("message", (msg, rinfo) => {
   if (!waitSock) {
     waitSock = rinfo;
     const stream = new ReliableUdp({ port: rinfo.port, ip: rinfo.address, sock });
-    fs.createReadStream("UdpHolePunch.js").pipe(stream);
-    stream.pipe(fs.createWriteStream("UdpHolePunch2.js"));
+    console.log("连接好了");
+    if (process.argv[3]) {
+      console.log("发送", process.argv[3]);
+      fs.createReadStream(process.argv[3]).pipe(stream);
+    } else {
+      console.log("接收");
+      stream.write("\0");
+      stream.pipe(fs.createWriteStream("UdpHolePunch.bin"));
+    }
   }
 });

@@ -72,6 +72,7 @@ export class ShowTransferProgress {
   private update() {
     if (this.opt.totalSize === this.filesize) {
       this.end();
+      return;
     }
     /** 如果opt.interval为0，则每次增加数据都同步显示到控制台 */
     if (this.opt.interval === 0) {
