@@ -273,6 +273,7 @@ export class HttpProxy {
           const port = Number(httpProxyReq.url.port || (url.protocol === "https:" ? 443 : 80));
           this.operatingSystemHttpProxy
             .getHttpProxySocket(host, port, this.initialOperatingSystemHttpProxys)
+            // @ts-ignore
             .then(socket => oncreate(null, encrypted ? tls.connect({ servername: host, socket }) : socket));
           return undefined;
         };

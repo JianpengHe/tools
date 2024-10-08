@@ -623,7 +623,7 @@ export const socks5 = async (
 
   /** （二）代理服务器响应的报头 */
   const recvStream = new RecvStream(sock);
-  const [VER, METHOD] = await recvStream.readBufferSync(2);
+  const [VER, METHOD] = (await recvStream.readBufferSync(2)) || [];
   if (METHOD === 0xff) throw new Error(proxy.host + ":" + proxy.port + "代理服务器拒绝访问");
   if (METHOD) throw new Error(proxy.host + ":" + proxy.port + "代理服务器需要提供账号密码");
 
@@ -657,7 +657,8 @@ export const socks5 = async (
   sock.write(buf.buffer);
 
   /** （四）代理服务器响应 */
-  const [VERSION, RESPONSE, RSV, ADDRESS_TYPE, ip1, ip2, ip3, ip4, port1, port2] = await recvStream.readBufferSync(10);
+  const [VERSION, RESPONSE, RSV, ADDRESS_TYPE, ip1, ip2, ip3, ip4, port1, port2] =
+    (await recvStream.readBufferSync(10)) || [];
   if (RESPONSE) {
     throw new Error(proxy.host + ":" + proxy.port + "代理服务器错误，错误码:" + RESPONSE);
     /**
