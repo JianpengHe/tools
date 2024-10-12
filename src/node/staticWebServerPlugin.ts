@@ -25,14 +25,30 @@ async function staticWebServerPlugin(
   /** 打印访问日志 */
   if (opt?.showAccessLog !== false)
     console.log(`${new Date().toLocaleString()} ${req.socket.remoteAddress} ${req.method} ${req.url} -> ${filePath}`);
+  res.statusCode = 200;
 
   /** 访问目录 */
   if (isDir && opt?.autoIndex) {
-    // TODO
-    return 404;
+    try {
+      const fileList = ["../"];
+      for (const file of await fs.promises.readdir(filePath, {
+        withFileTypes: true,
+      })) {
+        fileList.push(file.name + (file.isDirectory() ? "/" : ""));
+      }
+      res.setHeader("Content-type", "text/html; charset=utf-8");
+      res.end(
+        `<html><meta name="viewport" content="width=device-width"><h1>Index ${decodeURIComponent(
+          url.pathname
+        )}</h1>${fileList.map(file => `<div><a href="${encodeURI(file)}">${file}</a></div>`).join("")}</html>`
+      );
+    } catch (e) {
+      res.statusCode = 404;
+      res.end(String(res.statusCode));
+    }
+    return res.statusCode;
   }
 
-  res.statusCode = 200;
   try {
     const { size } = await fs.promises.stat(filePath);
     const range =
@@ -48,9 +64,17 @@ async function staticWebServerPlugin(
       res.setHeader("Content-Length", Math.abs(start - end));
       fs.createReadStream(filePath, { start, end }).pipe(res);
       return res.statusCode;
+    } else {
+      res.setHeader("Content-Length", size);
+      fs.createReadStream(filePath).pipe(res);
     }
-    res.setHeader("Content-Length", size);
-    fs.createReadStream(filePath).pipe(res);
+
+    const { base } = path.parse(filePath);
+    if (filePath.endsWith(".html")) {
+      res.setHeader("Content-type", `text/html; charset=utf-8`);
+    } else {
+      res.setHeader("Content-Disposition", "attachment; filename=" + encodeURI(base));
+    }
 
     return res.statusCode;
   } catch (e) {
