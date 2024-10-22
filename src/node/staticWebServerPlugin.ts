@@ -14,6 +14,8 @@ async function staticWebServerPlugin(
     index?: string;
     /** 打印访问日志，默认true */
     showAccessLog?: boolean;
+    /** mime-types */
+    MimeTypes?: { [x: string]: string };
   }
 ) {
   const url = new URL("http://" + (req.headers?.host || "127.0.0.1") + req.url);
@@ -70,9 +72,18 @@ async function staticWebServerPlugin(
     }
 
     const { base } = path.parse(filePath);
-    if (filePath.endsWith(".html")) {
-      res.setHeader("Content-type", `text/html; charset=utf-8`);
-    } else {
+
+    if (
+      !Object.entries({ ".html": `text/html; charset=utf-8`, ".wasm": "application/wasm", ...opt?.MimeTypes }).some(
+        ([ext, header]) => {
+          if (filePath.endsWith(ext)) {
+            res.setHeader("Content-type", header);
+            return true;
+          }
+          return false;
+        }
+      )
+    ) {
       res.setHeader("Content-Disposition", "attachment; filename=" + encodeURI(base));
     }
 
