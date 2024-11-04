@@ -2,7 +2,7 @@
   // tsconfig 所在的根目录, 则是一个project
   "compilerOptions": {
     "module": "commonjs", // 模块系统
-    "target": "es2020", // 生成目标, 一般选择ES6，因为不是客户端环境，没必要还编译成  ES5
+    "target": "ESNext", // 生成目标, 一般选择ES6，因为不是客户端环境，没必要还编译成  ES5
 
     // 一组严苛的编译选项
     "noImplicitAny": false,
