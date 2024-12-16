@@ -91,7 +91,7 @@ export class WebmToPCM {
           //   var bytes1Len = [];
           var bytes1 = this.readMatroskaBlock(
             bytes0,
-            pos0
+            pos0,
             //, bytes1Len
           );
           var pos1 = [0];
@@ -139,7 +139,7 @@ export class WebmToPCM {
       }
       //End Cluster
 
-      var bytes0 = this.readMatroskaBlock(fileBytes, this.position);
+      var bytes0: Uint8Array = this.readMatroskaBlock(fileBytes, this.position);
       var pos0 = [0];
 
       //Track

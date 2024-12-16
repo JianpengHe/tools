@@ -205,7 +205,7 @@ export class DnsServer {
           colorType(answer?.TYPE || 0) +
           "\t" +
           answer?.RDATA +
-          "\x1B[0m"
+          "\x1B[0m",
       );
     }
 
@@ -245,7 +245,7 @@ export class DnsServer {
           console.log("DNS Server\t", err);
           this.udpServer.close();
         }
-      }
+      },
     );
   }
   private killBindPort = (port: number, autoSettings: boolean) =>
@@ -417,7 +417,7 @@ export const dnsResolveRaw = (
   /** 可传入IDnsResolve对象或者直接传入buffer */
   opt: Omit<IDnsResolve, "count_queries" | "count_answers" | "count_auth_rr" | "count_add_rr" | "answers"> | Buffer,
   dnsServerIp: string,
-  dnsServerPort: number = 53
+  dnsServerPort: number = 53,
 ): Promise<Required<IDnsResolve>> =>
   new Promise((resolve, reject) => {
     const client = dgram.createSocket("udp4");
@@ -429,18 +429,23 @@ export const dnsResolveRaw = (
       resolve(dnsResolveParse(fMsg));
       client.close();
     });
-    client.send(opt instanceof Buffer ? opt : dnsResolveStringify(opt), dnsServerPort, dnsServerIp, err => {
-      if (err) {
-        reject(err);
-        client.close();
-      }
-    });
+    client.send(
+      opt instanceof Buffer ? opt : dnsResolveStringify(opt as IDnsResolveStringifyOpt),
+      dnsServerPort,
+      dnsServerIp,
+      err => {
+        if (err) {
+          reject(err);
+          client.close();
+        }
+      },
+    );
   });
 
 export const dnsResolve = async (
   host: string,
   dnsServerIp: string = "",
-  dnsServerPort: number = 53
+  dnsServerPort: number = 53,
 ): Promise<string> => {
   const { answers } = await dnsResolveRaw({ queries: [{ QNAME: host }] }, dnsServerIp || getDnsServer(), dnsServerPort);
   const RDATA = answers.find(({ TYPE, CLASS }) => CLASS === 1 && TYPE === EDnsResolveType.A)?.RDATA;

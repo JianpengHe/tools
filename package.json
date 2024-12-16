@@ -10,10 +10,9 @@
   "author": "JianpengHe",
   "license": "ISC",
   "devDependencies": {
-    "@types/node": "^22.8.7",
-    "prettier": "^3.3.3",
-    "tslint-config-prettier": "^1.18.0",
-    "typescript": "^5.6.3"
+    "@types/node": "^22.10.1",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2"
   },
   "bugs": {
     "url": "https://github.com/JianpengHe/tools/issues"
