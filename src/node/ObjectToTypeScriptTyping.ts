@@ -123,12 +123,20 @@ export class ObjectToTypeScriptTyping {
     }
 
     // 为每个键创建类型定义，并按键名排序
-    return Object.fromEntries(
+    const output = Object.fromEntries(
       [...objectKeyMap.keys()]
         .sort()
         .map(key => [key, new ObjectToTypeScriptTyping(objectKeyMap.get(key)!, this.options, deep + 1)]),
     );
-    //   const objectType: { [x: string]: ObjectToTypeScriptTyping }={};
+    // 特殊处理对象类型
+    // 如果所有的key都是number类型的
+    if (objectKeyMap.size > 0 && Object.keys(output).some(key => !isNaN(Number(key)))) {
+      return {
+        "[x: string]": new ObjectToTypeScriptTyping([...objectKeyMap.values()].flat(), this.options, deep + 1),
+      };
+    }
+
+    return output;
   }
 
   /**
@@ -179,8 +187,8 @@ export class ObjectToTypeScriptTyping {
     // 将所有类型转换为字符串表示
     const typeStr = new Set(
       [...this.typeMap].map(type => {
-        if (typeof type === "string") return type;
-        if (Array.isArray(type)) return type[0].format() + "[]";
+        if (typeof type === "string") return type.trim();
+        if (Array.isArray(type)) return (type[0].typeMap.size > 1 ? `(${type[0].format()})` : type[0].format()) + "[]";
         return (
           "{\n" +
           Object.entries(type)
@@ -203,14 +211,14 @@ export class ObjectToTypeScriptTyping {
       // 如果类型包含undefined且不止一种类型，将属性标记为可选
       if (typeStr.has("undefined") && typeStr.size > 1) {
         typeStr.delete("undefined");
-        output += "?";
+        if (key !== "[x: string]") output += "?";
       }
       output += ": ";
     }
 
     // 合并所有类型，使用联合类型表示
     output += [...typeStr].sort().join(" | ");
-    return output;
+    return output.replace(/\{\n\s*\}/g, "{}"); //.replace(/:\s\[\];/g, ": any[];");
   }
 
   /**
@@ -224,4 +232,4 @@ export class ObjectToTypeScriptTyping {
 }
 
 /** 使用例子 */
-// console.log(String(new ObjectToTypeScriptTyping([null])));
+// console.log(String(new ObjectToTypeScriptTyping([{ 1: { name: "1" }, 2: { name: "2" }, 3: { name: "3" } }])));
