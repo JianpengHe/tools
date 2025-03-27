@@ -1,4 +1,16 @@
-// 导出一个函数，用于计算表示一个数字所需的字节长度
+/**
+ * 二进制数据处理模块
+ * 提供高效的二进制数据读写操作，支持各种数据类型和字节序
+ */
+
+/**
+ * 计算表示一个数字所需的字节长度
+ * 根据数字大小、符号类型和增长方式计算所需的最少字节数
+ * @param num 要计算的数字
+ * @param isUnsigned 是否是无符号数，默认为true
+ * @param isPower 是否使用2的幂次方增长（1,2,4,8字节），默认为false（使用线性增长1,2,3,4字节）
+ * @returns 表示该数字所需的字节数
+ */
 export const getNumberLen = (
   /** 数字 */
   num = 0,
@@ -35,16 +47,35 @@ export const getNumberLen = (
   return Infinity;
 };
 
-// 导出Buf类，用于处理二进制数据的读写操作
+/**
+ * Buf类 - 二进制数据缓冲区操作类
+ * 提供了一系列方法用于读写二进制数据，支持不同的数据类型和字节序
+ * 实现了类似于Java的ByteBuffer或C#的BinaryReader/BinaryWriter的功能
+ */
 export class Buf {
-  // 存储最后一次读取操作的值
+  /**
+   * 存储最后一次读取操作的值
+   * 用于在链式调用中获取读取结果
+   */
   public lastReadValue: any;
-  // 当前缓冲区的偏移量
+
+  /**
+   * 当前缓冲区的偏移量
+   * 表示下一次读写操作的起始位置
+   */
   public offset: number;
-  // 内部缓冲区
+
+  /**
+   * 内部缓冲区
+   * 存储实际的二进制数据
+   */
   public buffer: Buffer;
 
-  // 构造函数，初始化缓冲区和偏移量
+  /**
+   * 构造函数
+   * @param buf 初始缓冲区，如果未提供则创建空缓冲区
+   * @param offset 初始偏移量，默认为0
+   */
   constructor(buf?: Buffer, offset?: number) {
     // 如果没有提供缓冲区，创建一个空的缓冲区
     this.buffer = buf ?? Buffer.allocUnsafe(0);
@@ -52,7 +83,13 @@ export class Buf {
     this.offset = offset ?? 0;
   }
 
-  // 将无符号整数转换为小端序缓冲区
+  /**
+   * 将无符号整数转换为小端序缓冲区
+   * 小端序：低位字节在前，高位字节在后
+   * @param number 要转换的数字
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @returns 包含数字的小端序缓冲区
+   */
   public UIntLEToBuffer(number: number, byteLength?: number) {
     // 如果没有指定字节长度，自动计算所需的字节数
     byteLength = byteLength || getNumberLen(number, true);
@@ -74,7 +111,13 @@ export class Buf {
     }
   }
 
-  // 将无符号整数转换为大端序缓冲区
+  /**
+   * 将无符号整数转换为大端序缓冲区
+   * 大端序：高位字节在前，低位字节在后
+   * @param number 要转换的数字
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @returns 包含数字的大端序缓冲区
+   */
   public UIntBEToBuffer(number: number, byteLength?: number) {
     // 如果没有指定字节长度，自动计算所需的字节数
     byteLength = byteLength || getNumberLen(number, true);
@@ -96,7 +139,12 @@ export class Buf {
     }
   }
 
-  // 将有符号整数转换为小端序缓冲区
+  /**
+   * 将有符号整数转换为小端序缓冲区
+   * @param number 要转换的数字
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @returns 包含数字的小端序缓冲区
+   */
   public IntLEToBuffer(number: number, byteLength?: number) {
     // 如果没有指定字节长度，自动计算所需的字节数
     byteLength = byteLength || getNumberLen(number, false);
@@ -118,7 +166,12 @@ export class Buf {
     }
   }
 
-  // 将有符号整数转换为大端序缓冲区
+  /**
+   * 将有符号整数转换为大端序缓冲区
+   * @param number 要转换的数字
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @returns 包含数字的大端序缓冲区
+   */
   public IntBEToBuffer(number: number, byteLength?: number) {
     // 如果没有指定字节长度，自动计算所需的字节数
     byteLength = byteLength || getNumberLen(number, false);
@@ -140,7 +193,13 @@ export class Buf {
     }
   }
 
-  // 分配指定长度的缓冲区并添加到当前缓冲区
+  /**
+   * 分配指定长度的缓冲区并添加到当前缓冲区
+   * 用于扩展当前缓冲区的容量
+   * @param length 要分配的字节数
+   * @param fill 填充值，如果提供则用该值填充新分配的缓冲区
+   * @returns this引用，支持链式调用
+   */
   public alloc(length: number, fill?: number) {
     // 创建指定长度的未初始化缓冲区
     const buf = Buffer.allocUnsafe(length);
@@ -152,7 +211,12 @@ export class Buf {
     return this.concat(buf);
   }
 
-  // 将多个缓冲区连接到当前缓冲区
+  /**
+   * 将多个缓冲区连接到当前缓冲区
+   * 用于合并多个Buffer对象
+   * @param buf 要连接的缓冲区列表
+   * @returns this引用，支持链式调用
+   */
   public concat(...buf: Buffer[]) {
     // 将当前缓冲区与传入的缓冲区连接起来
     this.buffer = Buffer.concat([this.buffer, ...buf]);
@@ -160,7 +224,12 @@ export class Buf {
     return this;
   }
 
-  // 从缓冲区读取指定长度的数据
+  /**
+   * 从缓冲区读取指定长度的数据
+   * @param length 要读取的字节数，如果为负数则读取到缓冲区末尾
+   * @param offset 读取的起始位置，默认为当前偏移量
+   * @returns 读取的数据缓冲区
+   */
   public read(length: number, offset?: number): Buffer {
     // 如果没有提供偏移量，使用当前偏移量
     offset = offset ?? this.offset;
@@ -174,7 +243,13 @@ export class Buf {
     return this.lastReadValue;
   }
 
-  // 从缓冲区读取字符串
+  /**
+   * 从缓冲区读取字符串
+   * 如果未指定长度，则读取到第一个NULL字符（0）为止
+   * @param length 要读取的字节数，如果未指定则读取到NULL字符
+   * @param offset 读取的起始位置，默认为当前偏移量
+   * @returns 读取的字符串
+   */
   public readString(length?: number, offset?: number): string {
     // 如果没有提供偏移量，使用当前偏移量
     offset = offset ?? this.offset;
@@ -188,7 +263,12 @@ export class Buf {
     return this.lastReadValue;
   }
 
-  // 从缓冲区读取大端序无符号整数
+  /**
+   * 从缓冲区读取大端序无符号整数
+   * @param byteLength 要读取的字节数
+   * @param offset 读取的起始位置，默认为当前偏移量
+   * @returns 读取的整数值
+   */
   public readUIntBE(byteLength: number, offset?: number): number {
     // 如果没有提供偏移量，使用当前偏移量
     this.offset = offset ?? this.offset;
@@ -212,7 +292,12 @@ export class Buf {
     return this.lastReadValue;
   }
 
-  // 从缓冲区读取小端序无符号整数
+  /**
+   * 从缓冲区读取小端序无符号整数
+   * @param byteLength 要读取的字节数
+   * @param offset 读取的起始位置，默认为当前偏移量
+   * @returns 读取的整数值
+   */
   public readUIntLE(byteLength: number, offset?: number): number {
     // 如果没有提供偏移量，使用当前偏移量
     this.offset = offset ?? this.offset;
@@ -236,7 +321,12 @@ export class Buf {
     return this.lastReadValue;
   }
 
-  // 从缓冲区读取大端序有符号整数
+  /**
+   * 从缓冲区读取大端序有符号整数
+   * @param byteLength 要读取的字节数
+   * @param offset 读取的起始位置，默认为当前偏移量
+   * @returns 读取的整数值
+   */
   public readIntBE(byteLength: number, offset?: number): number {
     // 如果没有提供偏移量，使用当前偏移量
     this.offset = offset ?? this.offset;
@@ -260,7 +350,12 @@ export class Buf {
     return this.lastReadValue;
   }
 
-  // 从缓冲区读取小端序有符号整数
+  /**
+   * 从缓冲区读取小端序有符号整数
+   * @param byteLength 要读取的字节数
+   * @param offset 读取的起始位置，默认为当前偏移量
+   * @returns 读取的整数值
+   */
   public readIntLE(byteLength: number, offset?: number): number {
     // 如果没有提供偏移量，使用当前偏移量
     this.offset = offset ?? this.offset;
@@ -284,7 +379,12 @@ export class Buf {
     return this.lastReadValue;
   }
 
-  // 将数据写入缓冲区
+  /**
+   * 将数据写入缓冲区
+   * @param buf 要写入的数据
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public write(buf: Buffer, offset?: number) {
     // 如果没有提供偏移量，使用当前偏移量
     offset = offset ?? this.offset;
@@ -302,37 +402,74 @@ export class Buf {
     return this;
   }
 
-  // 写入大端序无符号整数
+  /**
+   * 写入大端序无符号整数
+   * @param number 要写入的整数
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public writeUIntBE(number: number, byteLength?: number, offset?: number) {
     // 将数字转换为大端序缓冲区并写入
     return this.write(this.UIntBEToBuffer(number, byteLength), offset);
   }
 
-  // 写入小端序无符号整数
+  /**
+   * 写入小端序无符号整数
+   * @param number 要写入的整数
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public writeUIntLE(number: number, byteLength?: number, offset?: number) {
     // 将数字转换为小端序缓冲区并写入
     return this.write(this.UIntLEToBuffer(number, byteLength), offset);
   }
 
-  // 写入大端序有符号整数
+  /**
+   * 写入大端序有符号整数
+   * @param number 要写入的整数
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public writeIntBE(number: number, byteLength?: number, offset?: number) {
     // 将数字转换为大端序缓冲区并写入
     return this.write(this.IntBEToBuffer(number, byteLength), offset);
   }
 
-  // 写入小端序有符号整数
+  /**
+   * 写入小端序有符号整数
+   * @param number 要写入的整数
+   * @param byteLength 字节长度，如果未指定则自动计算
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public writeIntLE(number: number, byteLength?: number, offset?: number) {
     // 将数字转换为小端序缓冲区并写入
     return this.write(this.IntLEToBuffer(number, byteLength), offset);
   }
 
-  // 写入以NULL结尾的字符串
+  /**
+   * 写入以NULL结尾的字符串
+   * 常用于C风格字符串，以\0结尾
+   * @param str 要写入的字符串或缓冲区
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public writeStringNUL(str: string | Buffer, offset?: number) {
     // 将字符串转换为缓冲区，并在末尾添加NULL字符（0）
     return this.write(Buffer.concat([Buffer.from(str), this.UIntBEToBuffer(0)]), offset);
   }
 
-  // 写入带前缀的字符串（前缀通常表示字符串长度）
+  /**
+   * 写入带前缀的字符串
+   * 可以自定义前缀生成方式，通常用于表示字符串长度
+   * @param str 要写入的字符串或缓冲区
+   * @param prefixCallBackFn 前缀回调函数，接收字符串长度，返回前缀缓冲区
+   * @param offset 写入的起始位置，默认为当前偏移量
+   * @returns this引用，支持链式调用
+   */
   public writeStringPrefix(
     str: string | Buffer,
     prefixCallBackFn?: (length: number) => Buffer | undefined,
