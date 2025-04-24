@@ -137,6 +137,8 @@ export class AggregationStream extends stream.Readable {
 //   });
 
 // 测试用例（分片下载）
+// import * as os from "os";
+// import * as tls from "tls";
 // import * as https from "https";
 // import * as fs from "fs";
 // /** 显示网速，非必须 */
@@ -145,10 +147,29 @@ export class AggregationStream extends stream.Readable {
 // const downloadUrl =
 //   "https://f.c2r.ts.cdn.office.net/pr/55336b82-a18d-4dd6-b5f6-9e5095c314a6/Office/Data/16.0.16130.20394/stream.x64.x-none.dat";
 
-// const maxSockets = 30;
+// const maxSockets = 50;
 // /** 每次下载的大小 */
 // const bufferSizePerRes = 1024 * 1024;
-// const agent = new https.Agent({ maxSockets });
+// const agent = new https.Agent({ maxSockets, keepAlive: true });
+// /** 多个网卡，非必须 */
+// (() => {
+//   // let sock = 0;
+//   const ips: string[] = [];
+//   for (const arr of Object.values(os.networkInterfaces())) {
+//     const { address, internal } = arr?.find(({ family }) => family === "IPv4") || {};
+//     if (internal) break;
+//     address && ips.push(address);
+//   }
+//   console.log(ips);
+//   // @ts-ignore
+//   agent.createConnection = ({ host, port }, oncreate) => {
+//     const localAddress = ips[Math.floor(ips.length * Math.random())];
+//     console.log(host, port, localAddress);
+//     // @ts-ignore
+//     return tls.connect({ port, host, rejectUnauthorized: false, localAddress });
+//   };
+// })();
+
 // https.get(downloadUrl, { agent }, res => {
 //   const size = Number(res.headers["content-length"] || 0);
 //   if (!res.headers["accept-ranges"] || !size) {
@@ -157,7 +178,7 @@ export class AggregationStream extends stream.Readable {
 //   }
 //   const fileName = (String(res.headers["content-disposition"] || "").match(/filename=([^;]+)/) || [])[1] || "data.bin";
 //   /** 显示网速，非必须 */
-//   const showTransferProgress = new ShowTransferProgress(fileName, size, 1000);
+//   const showTransferProgress = new ShowTransferProgress({ title: fileName, totalSize: size, interval: 1000 });
 //   console.log("启动服务，共", Math.ceil(size / bufferSizePerRes), "分片");
 //   new AggregationStream(
 //     Math.ceil(size / bufferSizePerRes),
@@ -168,6 +189,7 @@ export class AggregationStream extends stream.Readable {
 //           downloadUrl,
 //           {
 //             agent,
+
 //             headers: {
 //               range: `bytes=${bufferSizePerRes * index}-${Math.min(size, bufferSizePerRes * (index + 1) - 1)}`,
 //             },
@@ -179,8 +201,8 @@ export class AggregationStream extends stream.Readable {
 //               showTransferProgress.add(chuck.length);
 //             }
 //             r(Buffer.concat(body));
-//           }
-//         )
-//       )
+//           },
+//         ),
+//       ),
 //   ).pipe(fs.createWriteStream(fileName));
 // });
