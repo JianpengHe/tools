@@ -92,6 +92,9 @@ export type IHttpProxyOpt = {
 
   /** 本代理对外的请求是否使用系统设置的代理。在DnsServer模式下会有一点小问题，正在解决 */
   useSystemProxy?: boolean; // false
+
+  /** 禁用一般的日志输出控制台 */
+  disableLog?: boolean; // false
 };
 
 /**
@@ -209,10 +212,11 @@ export class HttpProxy {
        * 当客户端请求PAC脚本配置时，返回一个JavaScript函数，该函数告诉浏览器哪些域名需要通过代理访问
        */
       if (!encrypted && req.url === `/pg_pac_script_config/${this.token}`) {
-        console.log(
-          "读取PAC脚本",
-          this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : "",
-        );
+        this.opt.disableLog ||
+          console.log(
+            "读取PAC脚本",
+            this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : "",
+          );
         res.end(`function FindProxyForURL(url, host) {
         if (${
           /** 如果存在onNewHost，就说明需要动态添加域名，因此无法使用PAC脚本 */
@@ -529,16 +533,17 @@ export class HttpProxy {
        */
       const showUrl = new URL(String(url));
       showUrl.host = httpProxyReq.headers.host;
-      console.log(
-        showUrl.protocol,
-        "\t",
-        String(req.method || "").padEnd(7, " "),
-        "\t",
-        ...(this.opt.showProcessName
-          ? [await getProcessNameByPort(req.socket.remotePort, req.socket.localPort), "\t"]
-          : []),
-        String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : ""),
-      );
+      this.opt.disableLog ||
+        console.log(
+          showUrl.protocol,
+          "\t",
+          String(req.method || "").padEnd(7, " "),
+          "\t",
+          ...(this.opt.showProcessName
+            ? [await getProcessNameByPort(req.socket.remotePort, req.socket.localPort), "\t"]
+            : []),
+          String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : ""),
+        );
     },
   );
 
@@ -569,6 +574,7 @@ export class HttpProxy {
     opt.proxyMode = opt?.proxyMode;
     opt.autoSettings = opt?.autoSettings ?? true;
     opt.showProcessName = opt?.showProcessName ?? true;
+    opt.disableLog = opt?.disableLog ?? false;
     this.opt = opt;
     this.certificateCenter = new URL(certificateCenter);
     this.proxyServer.once("error", console.error);
@@ -600,7 +606,7 @@ export class HttpProxy {
        * 检查IP地址是否与代理服务器地址冲突
        */
       const { proxyMode } = opt;
-      console.log("需要代理的域名对应的ip");
+      this.opt.disableLog || console.log("需要代理的域名对应的ip");
       ips.forEach((ip, i) => {
         if (ip) {
           if (
@@ -618,7 +624,7 @@ export class HttpProxy {
             );
             throw new TypeError("请关闭其他正在运行的HttpProxy或DnsServer");
           }
-          console.log(ip.padEnd(15, " "), "\t", this.hosts[i]);
+          this.opt.disableLog || console.log(ip.padEnd(15, " "), "\t", this.hosts[i]);
           this.hostsOriginalIpMap.set(this.hosts[i], ip);
         }
       });
@@ -660,7 +666,7 @@ export class HttpProxy {
              * 如果启用了onlyProxyHostInList选项，且域名不在代理列表中，则直接转发不解包
              */
             if (opt.onlyProxyHostInList && !this.hostsOriginalIpMap.has(host)) {
-              console.log("不解包，直接转发", host, port);
+              this.opt.disableLog || console.log("不解包，直接转发", host, port);
               const remoteSock = this.initialOperatingSystemHttpProxys
                 ? await this.operatingSystemHttpProxy.getHttpProxySocket(
                     host,
@@ -715,9 +721,9 @@ export class HttpProxy {
             })
             .then(proxyWin => proxyWin.get())
             .then(arr => {
-              console.log("已自动帮您修改系统设置：");
+              this.opt.disableLog || console.log("已自动帮您修改系统设置：");
               for (const { proxyIp, pac, networkService } of arr) {
-                console.log(networkService, "代理服务器", proxyIp, "PAC脚本", pac);
+                this.opt.disableLog || console.log(networkService, "代理服务器", proxyIp, "PAC脚本", pac);
               }
             });
         } else {
