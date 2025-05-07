@@ -220,6 +220,10 @@ export class HttpProxy {
             "读取PAC脚本",
             this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : "",
           );
+        /** 以前的代理IP */
+        const oldProxyIp = ((await this.initialOperatingSystemHttpProxys) || []).find(
+          ({ status, proxyIp }) => status & 0b0011 && proxyIp,
+        )?.proxyIp;
         res.end(`function FindProxyForURL(url, host) {
         if (${
           /** 如果存在onNewHost，就说明需要动态添加域名，因此无法使用PAC脚本 */
@@ -227,7 +231,7 @@ export class HttpProxy {
         }) {
           return "PROXY ${this.opt.proxyBindIp}:${this.opt.proxyBindPort}; DIRECT";
         } else {
-          return "DIRECT";
+          return "${oldProxyIp ? `PROXY ${oldProxyIp}; ` : ""}DIRECT";
         }
       }`);
         return;
@@ -413,16 +417,18 @@ export class HttpProxy {
        * 配置系统代理
        * 如果需要通过系统代理发送请求，配置createConnection函数
        */
-      if (this.initialOperatingSystemHttpProxys) {
+      if (this.useSystemProxy) {
         requestOptions.createConnection = ({ host }, oncreate: (err: Error | null, socket: net.Socket) => void) => {
           host = httpProxyReq.headers?.host || host || "";
           const port = Number(httpProxyReq.url.port || (url.protocol === "https:" ? 443 : 80));
-          this.operatingSystemHttpProxy
-            .getHttpProxySocket(host, port, this.initialOperatingSystemHttpProxys)
-            // @ts-ignore
-            .then(socket =>
-              oncreate(null, url.protocol === "https:" ? tls.connect({ servername: host, socket }) : socket),
-            );
+          this.initialOperatingSystemHttpProxys?.then(async operatingSystemHttpProxys => {
+            this.operatingSystemHttpProxy
+              .getHttpProxySocket(host, port, operatingSystemHttpProxys)
+              // @ts-ignore
+              .then(socket =>
+                oncreate(null, url.protocol === "https:" ? tls.connect({ servername: host, socket }) : socket),
+              );
+          });
           return undefined;
         };
       }
@@ -562,7 +568,9 @@ export class HttpProxy {
    * 最开始的系统代理规则
    * 存储系统原始的代理设置，用于恢复或使用系统代理
    */
-  private initialOperatingSystemHttpProxys?: Awaited<ReturnType<OperatingSystemHttpProxy["get"]>>;
+  private initialOperatingSystemHttpProxys?: ReturnType<OperatingSystemHttpProxy["get"]>;
+  /** 本代理对外的请求是否使用系统设置的代理 */
+  private useSystemProxy: boolean;
 
   /**
    * 创建一个HTTP代理服务器
@@ -588,11 +596,10 @@ export class HttpProxy {
     this.certificateCenter = certificateCenter;
     this.proxyServer.once("error", console.error);
     this.operatingSystemHttpProxy = new OperatingSystemHttpProxy(opt.autoSettings);
+    this.useSystemProxy = opt.useSystemProxy ?? false;
     /** 如果需要使用系统代理，就要先保存最开始的系统代理规则 */
-    if (opt.useSystemProxy) {
-      this.operatingSystemHttpProxy.get().then(opt => {
-        this.initialOperatingSystemHttpProxys = opt;
-      });
+    if (this.useSystemProxy || opt.autoSettings) {
+      this.initialOperatingSystemHttpProxys = this.operatingSystemHttpProxy.get();
     }
 
     Promise.all(
@@ -678,11 +685,11 @@ export class HttpProxy {
              */
             if (opt.onlyProxyHostInList && !this.hostsOriginalIpMap.has(host)) {
               this.opt.disableLog || console.log("不解包，直接转发", host, port);
-              const remoteSock = this.initialOperatingSystemHttpProxys
+              const remoteSock = this.useSystemProxy
                 ? await this.operatingSystemHttpProxy.getHttpProxySocket(
                     host,
                     port,
-                    this.initialOperatingSystemHttpProxys,
+                    await this.initialOperatingSystemHttpProxys,
                   )
                 : net.connect({ host, port });
               remoteSock.on("error", () => socket.end());
