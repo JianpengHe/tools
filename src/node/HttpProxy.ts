@@ -117,10 +117,10 @@ const getHostPort = (rawHost: string): [string, number] => {
  */
 export class HttpProxy {
   /**
-   * 使用PG的公共证书签发平台
+   * 使用PG的公共证书签发平台或自定义ssl证书
    * 用于获取HTTPS代理所需的SSL证书
    */
-  private readonly certificateCenter: URL;
+  private readonly certificateCenter: URL | ((host: string) => Promise<tls.SecureContextOptions>);
 
   /**
    * 获取SSL证书
@@ -128,10 +128,12 @@ export class HttpProxy {
    * @param host 需要获取证书的域名
    * @returns 返回一个Promise，解析为tls.SecureContext对象
    */
-  private readonly createSecureContext = async (host: string): Promise<tls.SecureContext> =>
-    new Promise((resolve, reject) => {
-      (this.certificateCenter.protocol === "https:" ? https : http)
-        .get(`${this.certificateCenter}${host}`, async res => {
+  private readonly createSecureContext = async (host: string): Promise<tls.SecureContext> => {
+    const { certificateCenter } = this;
+    if (typeof certificateCenter === "function") return tls.createSecureContext(await certificateCenter(host));
+    return new Promise((resolve, reject) =>
+      (certificateCenter.protocol === "https:" ? https : http)
+        .get(`${certificateCenter}${host}`, async res => {
           res.once("error", reject);
           try {
             resolve(tls.createSecureContext(JSON.parse(String(await recvAll(res)))));
@@ -139,8 +141,9 @@ export class HttpProxy {
             reject(e);
           }
         })
-        .once("error", reject);
-    });
+        .once("error", reject),
+    );
+  };
 
   /**
    * 需要代理哪些域名
@@ -563,9 +566,13 @@ export class HttpProxy {
    * 创建一个HTTP代理服务器
    * @param hosts 需要代理的域名列表
    * @param opt 代理服务器的配置选项
-   * @param certificateCenter 证书中心的URL，用于获取HTTPS代理所需的SSL证书
+   * @param certificateCenter 证书中心的URL，用于获取HTTPS代理所需的SSL证书或回调函数
    */
-  constructor(hosts: string[], opt: IHttpProxyOpt = {}, certificateCenter = "https://tool.hejianpeng.cn/certificate/") {
+  constructor(
+    hosts: string[],
+    opt: IHttpProxyOpt = {},
+    certificateCenter: HttpProxy["certificateCenter"] = new URL("https://tool.hejianpeng.cn/certificate/"),
+  ) {
     this.hosts = hosts || [];
     this.routeMap = opt?.routeMap || new Map();
     opt.proxyBindIp = opt?.proxyBindIp || "127.0.0.1";
@@ -576,7 +583,7 @@ export class HttpProxy {
     opt.showProcessName = opt?.showProcessName ?? true;
     opt.disableLog = opt?.disableLog ?? false;
     this.opt = opt;
-    this.certificateCenter = new URL(certificateCenter);
+    this.certificateCenter = certificateCenter;
     this.proxyServer.once("error", console.error);
     this.operatingSystemHttpProxy = new OperatingSystemHttpProxy(opt.autoSettings);
     /** 如果需要使用系统代理，就要先保存最开始的系统代理规则 */
@@ -628,10 +635,12 @@ export class HttpProxy {
           this.hostsOriginalIpMap.set(this.hosts[i], ip);
         }
       });
-      console.log("\t");
-      console.warn(
-        `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}，否则不支持HTTPS\x1B[0m`,
-      );
+      if (typeof this.certificateCenter !== "function") {
+        console.log("\t");
+        console.warn(
+          `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}，否则不支持HTTPS\x1B[0m`,
+        );
+      }
 
       /**
        * HTTP代理模式
@@ -818,13 +827,14 @@ export class HttpProxy {
            */
           proxyMode.onDnsLookup = async ({ QNAME }, answer) => {
             const { RDATA, TYPE } = answer || {};
+            const { certificateCenter } = this;
             if (
               onNewHost &&
               TYPE === EDnsResolveType.A &&
               RDATA &&
               !this.hostsOriginalIpMap.has(QNAME) &&
-              (await onNewHost(QNAME)) &&
-              QNAME !== this.certificateCenter.hostname
+              (typeof certificateCenter === "function" || QNAME !== certificateCenter.hostname) &&
+              (await onNewHost(QNAME))
             ) {
               // console.log("手动添加", QNAME);
               this.hosts.push(QNAME);
