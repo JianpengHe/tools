@@ -420,7 +420,9 @@ export class HttpProxy {
           this.operatingSystemHttpProxy
             .getHttpProxySocket(host, port, this.initialOperatingSystemHttpProxys)
             // @ts-ignore
-            .then(socket => oncreate(null, encrypted ? tls.connect({ servername: host, socket }) : socket));
+            .then(socket =>
+              oncreate(null, url.protocol === "https:" ? tls.connect({ servername: host, socket }) : socket),
+            );
           return undefined;
         };
       }
