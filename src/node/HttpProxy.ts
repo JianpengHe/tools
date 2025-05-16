@@ -22,6 +22,7 @@ import { recvAll } from "./utils";
 import {
   EOperatingSystemHttpProxyStatus,
   getProcessNameByPort,
+  IOperatingSystemHttpProxyOpt,
   OperatingSystemHttpProxy,
 } from "./systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
@@ -91,7 +92,13 @@ export type IHttpProxyOpt = {
   onlyProxyHostInList?: boolean; // false
 
   /** 本代理对外的请求是否使用系统设置的代理。在DnsServer模式下会有一点小问题，正在解决 */
-  useSystemProxy?: boolean; // false
+  useSystemProxy?:
+    | boolean
+    | ((
+        hostname: string,
+        port: number,
+        operatingSystemHttpProxys: Required<IOperatingSystemHttpProxyOpt>[],
+      ) => Promise<net.Socket>); // false
 
   /** 禁用一般的日志输出控制台 */
   disableLog?: boolean; // false
@@ -104,7 +111,7 @@ export type IHttpProxyOpt = {
  */
 const getHostPort = (rawHost: string): [string, number] => {
   const [_, host, port] = (rawHost || "").match(/^(.+):(\d+)$/) || [];
-  return [host, Number(port || 0)];
+  return [host ?? rawHost, Number(port || 0)];
 };
 
 /**
@@ -341,6 +348,7 @@ export class HttpProxy {
        */
       httpProxyReq.headers.host = url.host;
 
+      const rawHostname = url.hostname;
       /**
        * 解析域名为IP地址
        * 将URL中的域名替换为其对应的IP地址（如果存在映射）
@@ -417,17 +425,19 @@ export class HttpProxy {
        * 配置系统代理
        * 如果需要通过系统代理发送请求，配置createConnection函数
        */
-      if (this.useSystemProxy) {
-        requestOptions.createConnection = ({ host }, oncreate: (err: Error | null, socket: net.Socket) => void) => {
-          host = httpProxyReq.headers?.host || host || "";
+      const { useSystemProxy } = this;
+      if (useSystemProxy) {
+        requestOptions.createConnection = ({ hostname }, oncreate: (err: Error | null, socket: net.Socket) => void) => {
+          hostname = rawHostname || hostname || "";
           const port = Number(httpProxyReq.url.port || (url.protocol === "https:" ? 443 : 80));
           this.initialOperatingSystemHttpProxys?.then(async operatingSystemHttpProxys => {
-            this.operatingSystemHttpProxy
-              .getHttpProxySocket(host, port, operatingSystemHttpProxys)
-              // @ts-ignore
-              .then(socket =>
-                oncreate(null, url.protocol === "https:" ? tls.connect({ servername: host, socket }) : socket),
-              );
+            (useSystemProxy === true ? this.operatingSystemHttpProxy.getHttpProxySocket : useSystemProxy)(
+              hostname,
+              port,
+              operatingSystemHttpProxys,
+            ).then(socket =>
+              oncreate(null, url.protocol === "https:" ? tls.connect({ servername: hostname, socket }) : socket),
+            );
           });
           return undefined;
         };
@@ -570,7 +580,7 @@ export class HttpProxy {
    */
   private initialOperatingSystemHttpProxys?: ReturnType<OperatingSystemHttpProxy["get"]>;
   /** 本代理对外的请求是否使用系统设置的代理 */
-  private useSystemProxy: boolean;
+  private useSystemProxy: Required<IHttpProxyOpt>["useSystemProxy"];
 
   /**
    * 创建一个HTTP代理服务器
