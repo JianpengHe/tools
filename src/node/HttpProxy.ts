@@ -61,7 +61,7 @@ export type IHttpProxyRegFn = (method: string, url: URL, headers: http.IncomingH
  * HTTP代理服务器的配置选项
  */
 export type IHttpProxyOpt = {
-  /** 接受DnsServer对象、host文件地址，不传默认httpProxy模式 */
+  /** 接受DnsServer对象、host文件地址、"PAC Only"，不传默认httpProxy模式 */
   proxyMode?: TcpProxy["dnsMode"]; // undefined
 
   /** dnsMode为httpProxy时，代表【代理服务器】的地址，当dnsMode为DnsServer对象时，代表【中转服务器】地址（而不是使用127.xx.xx.xx，方便其他终端调试） */
@@ -319,7 +319,7 @@ export class HttpProxy {
       if (
         !encrypted &&
         onNewHost &&
-        proxyMode === undefined &&
+        (proxyMode === undefined || proxyMode === "PAC Only") &&
         url.hostname !== proxyBindIp &&
         (await onNewHost(url.hostname))
       ) {
@@ -626,7 +626,7 @@ export class HttpProxy {
             }),
           ) as Promise<string>,
       ),
-    ).then(ips => {
+    ).then(async ips => {
       /**
        * 获取所有需要代理的域名的IP地址
        * 检查IP地址是否与代理服务器地址冲突
@@ -636,7 +636,7 @@ export class HttpProxy {
       ips.forEach((ip, i) => {
         if (ip) {
           if (
-            proxyMode === undefined &&
+            (proxyMode === undefined || proxyMode === "PAC Only") &&
             ip === opt.proxyBindIp &&
             opt.listenRequestPorts?.includes(opt.proxyBindPort || 0)
           ) {
@@ -665,7 +665,7 @@ export class HttpProxy {
        * HTTP代理模式
        * 如果没有指定proxyMode，则使用普通的HTTP代理模式
        */
-      if (proxyMode === undefined) {
+      if (proxyMode === undefined || proxyMode === "PAC Only") {
         // "httpProxy"
         /**
          * 监听connect方法
@@ -739,21 +739,21 @@ export class HttpProxy {
          * 如果启用了autoSettings选项，自动配置系统代理设置
          */
         if (this.opt.autoSettings) {
-          this.operatingSystemHttpProxy
-            .set({
-              proxyIp: `${opt.proxyBindIp}:${opt.proxyBindPort}`,
-              status: this.opt.onNewHost
-                ? EOperatingSystemHttpProxyStatus.使用代理服务器
-                : EOperatingSystemHttpProxyStatus.使用脚本和代理,
-              pac: `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`,
-            })
-            .then(proxyWin => proxyWin.get())
-            .then(arr => {
-              this.opt.disableLog || console.log("已自动帮您修改系统设置：");
-              for (const { proxyIp, pac, networkService } of arr) {
-                this.opt.disableLog || console.log(networkService, "代理服务器", proxyIp, "PAC脚本", pac);
-              }
-            });
+          const newOperatingSystemHttpProxyOpt = ((await this.initialOperatingSystemHttpProxys) || [])[0] || {};
+          if (proxyMode !== "PAC Only")
+            newOperatingSystemHttpProxyOpt.proxyIp = `${opt.proxyBindIp}:${opt.proxyBindPort}`;
+          newOperatingSystemHttpProxyOpt.status = this.opt.onNewHost
+            ? EOperatingSystemHttpProxyStatus.使用代理服务器
+            : EOperatingSystemHttpProxyStatus.使用脚本和代理;
+          newOperatingSystemHttpProxyOpt.pac = `http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}`;
+          const proxyWin = await this.operatingSystemHttpProxy.set(newOperatingSystemHttpProxyOpt);
+          if (!this.opt.disableLog) {
+            const arr = await proxyWin.get();
+            console.log("已自动帮您修改系统设置：");
+            for (const { proxyIp, pac, networkService } of arr) {
+              console.log(networkService, "代理服务器", proxyIp, "PAC脚本", pac);
+            }
+          }
         } else {
           /**
            * 输出手动配置指南
