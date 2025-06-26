@@ -42,6 +42,7 @@ export class Console {
   public lastWriteLines: string[] = [];
   public write(str: string) {
     const newLines = str.split("\n");
+    if (newLines.length > process.stdout.rows - 1) newLines.splice(0, newLines.length - process.stdout.rows + 1);
     const oldLines = this.lastWriteLines;
     // logs.push(oldLines.join("\n") + "------------>" + newLines.join("\n"));
     const out: Array<EConsole | string> = [];
@@ -66,6 +67,26 @@ export class Console {
     // out.push("哈哈哈");
 
     for (let i = 0; i < newLines.length; i++) {
+      let newLine = newLines[i];
+      const maxChar = process.stdout.columns || 80;
+      if (Console.getStringPrintLen(newLine) >= maxChar) {
+        const strArr = newLine.match(/./gu) || [];
+        newLine = "";
+        do {
+          let curChar = strArr.shift();
+          if (curChar === undefined) break;
+          newLine += curChar;
+          /** 控制字符是一个整体，不能拆开 */
+          if (curChar === "\x1b") {
+            do {
+              curChar = strArr.shift();
+              if (curChar === undefined) break;
+              newLine += curChar;
+            } while (/[^a-z]/i.test(curChar));
+          }
+        } while (Console.getStringPrintLen(newLine) < maxChar - 4 && strArr.length);
+        newLine += Console.setColor(EConsoleStyle.none) + "...";
+      }
       /** 第一行不需要换行 */
       if (i) {
         /** 如果新行数比旧行数多，就需要换行符把屏幕撑开 */
@@ -77,18 +98,18 @@ export class Console {
         }
       }
       /** 完全不一样才操作 */
-      if (newLines[i] !== oldLines[i]) {
+      if (newLine !== oldLines[i]) {
         /** 如果上一行有长度，说明光标在上一行的结尾 */
         if (lastLine.length) {
           this.toLineStart(lastLine, out);
           //   out.push(EConsole.cleanLineAfter);
         }
-        this.updateLine(oldLines[i], newLines[i], out);
-        lastLine = newLines[i];
+        this.updateLine(oldLines[i], newLine, out);
+        lastLine = newLine;
         // out.push(newLines[i]);
       } else if (i === newLines.length - 1) {
         /** 最后一行完全相同的时候，光标依然停留在“上一个不相同的行”的结尾，所以需要调整 */
-        this.toLineStart(newLines[i], out, EConsole.right);
+        this.toLineStart(newLine, out, EConsole.right);
         this.toLineStart(lastLine, out);
       }
     }
@@ -193,16 +214,15 @@ export class Console {
   /** 获取单字符占用的长度 */
   static getCharPrintLen(str: string, index: number) {
     const codePoint = str.codePointAt(index);
-    if (codePoint) return codePoint > 256 ? 2 : 1;
-    return 0;
+    if (!codePoint || codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) return 0;
+    return codePoint > 256 ? 2 : 1;
   }
   /** 可打印字符的长度 */
   static getStringPrintLen(str: string) {
-    let len = 0;
-    for (let index = 0; index < str.length; index++) {
-      len += Console.getCharPrintLen(str, index);
-    }
-    return len;
+    return (str.replace(/\x1b[^a-zA-Z]*[a-zA-Z]/g, "").match(/./gu) || []).reduce(
+      (total, char) => total + Console.getCharPrintLen(char, 0),
+      0,
+    );
   }
 
   static up(lineCount = 1) {
@@ -230,7 +250,7 @@ export class Console {
     progress: number,
     width = 20,
     doneConsoleStyles: EConsoleStyle[] = [],
-    undoneConsoleStyles: EConsoleStyle[] = []
+    undoneConsoleStyles: EConsoleStyle[] = [],
   ) {
     const done = Math.round(width * progress);
     return (
@@ -251,12 +271,12 @@ export class Console {
 //     return;
 //   }
 //   con.write(
-//     `正在下载\n${p > 98 ? "XXX" : "最牛逼"}文件\n\n\n当前进度${Console.setStringColor(
+//     `正在下载\n${p > 98 ? "XXX" : "这是个很长的\x1b[31m红色红色红色红色红色\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m字符串，里面还有换行、\t制表符、\b退格，还有 emoji 🌟💖🌟💖🌟💖".repeat(3)}文件\n\n\n当前进度${Console.setStringColor(
 //       String(p),
 //       EConsoleStyle.Bold,
 //       p > 98 ? EConsoleStyle.yellowBackground : EConsoleStyle.greenBackground,
-//       EConsoleStyle.red
-//     )}%\n${p > 97 ? "请耐心等候\n正在连接" : ""}`
+//       EConsoleStyle.red,
+//     )}%\n${p > 97 ? "请耐心、耐心、耐心等候\n正在连接" : ""}`,
 //   );
 // }, 1000);
 
