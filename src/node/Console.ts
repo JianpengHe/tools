@@ -258,6 +258,13 @@ export class Console {
       Console.setStringColor("█".repeat(width - done), EConsoleStyle.white, ...undoneConsoleStyles)
     );
   }
+
+  static showTitle(title: string, paddingChar = "*") {
+    title = " " + title + " ";
+    const byteLength = Console.getStringPrintLen(title);
+    const padding = Math.max(0, (process.stdout.columns - byteLength) / 2);
+    console.log(paddingChar.repeat(Math.floor(padding)) + title + paddingChar.repeat(Math.ceil(padding)));
+  }
 }
 
 // 测试用例
