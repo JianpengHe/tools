@@ -1,27 +1,29 @@
 /** 校验网站https://jwt.io/ */
 import * as crypto from "crypto";
 
+export type JWTBasePayload = {
+  /** exp (Expiration time)：过期时间 */
+  exp?: number;
+  /** iat (Issued at)：签发时间 */
+  iat?: number;
+  /** iss (Issuer)：签发人 */
+  iss?: string;
+  /** sub (Subject)：主题 */
+  sub?: string;
+  /** jti (JWT ID)：JWT ID */
+  jti?: string;
+  /** nbf (Not before)：生效时间 */
+  nbf?: number;
+  /** aud (Audience)：接收者 */
+  aud?: string;
+};
+
 export class JWS<T extends Record<string, any>> {
   public readonly header: {
     alg: string;
     typ?: string;
   };
-  public readonly payload: {
-    /** exp (Expiration time)：过期时间 */
-    exp?: number;
-    /** iat (Issued at)：签发时间 */
-    iat?: number;
-    /** iss (Issuer)：签发人 */
-    iss?: string;
-    /** sub (Subject)：主题 */
-    sub?: string;
-    /** jti (JWT ID)：JWT ID */
-    jti?: string;
-    /** nbf (Not before)：生效时间 */
-    nbf?: number;
-    /** aud (Audience)：接收者 */
-    aud?: string;
-  } & T;
+  public readonly payload: JWTBasePayload & T;
   public readonly signature: Buffer;
   public readonly headerRAW: string;
   public readonly payloadRAW: string;
@@ -56,7 +58,7 @@ export class JWS<T extends Record<string, any>> {
     payload: JWS<T>["payload"],
     privateKey: string,
     exp?: number | Date,
-    alg = "HS256",
+    alg = "HS512",
   ): string {
     /** 添加过期时间 */
     if (exp) {
@@ -187,3 +189,97 @@ export class JWS<T extends Record<string, any>> {
 // stressTesting("ES256", ES256_KEY, 1000);
 // stressTesting("RS256", RS256_KEY, 1000);
 // stressTesting("PS256", PS256_KEY, 1000);
+
+/** JWT封装类，方便使用 */
+export class JWT<T extends Record<string, any> & JWTBasePayload> {
+  public readonly publicKey: string;
+  public readonly privateKey: string;
+  public readonly expTime: number;
+  public readonly alg?: string;
+  constructor(expTime: number, alg: string = "HS512", publicKey: string = "", privateKey: string = publicKey) {
+    if (!publicKey) {
+      const key = JWT.generateKey(alg);
+      publicKey = key.publicKey;
+      privateKey = key.privateKey;
+    }
+    this.publicKey = publicKey;
+    this.privateKey = privateKey;
+    this.expTime = expTime;
+    this.alg = alg;
+  }
+  public stringify(payload: T) {
+    return JWS.sign(payload, this.privateKey, this.expTime, this.alg);
+  }
+  public parse(token: string) {
+    return new JWS<T>(token);
+  }
+  public verify(jwt: JWS<T>) {
+    return jwt.verify(this.publicKey);
+  }
+  static generateKey(alg: string = "HS512") {
+    if (alg.startsWith("HS")) {
+      const privateKey = crypto.randomBytes(32).toString("hex");
+      return { publicKey: privateKey, privateKey };
+    }
+
+    if (alg.startsWith("RS") || alg.startsWith("PS")) {
+      return crypto.generateKeyPairSync("rsa", {
+        modulusLength: 2048, // 密钥长度，RS256 建议至少 2048 位
+        publicKeyEncoding: {
+          type: "spki", // 公钥标准，适合 JWT 用的 PEM 格式
+          format: "pem",
+        },
+        privateKeyEncoding: {
+          type: "pkcs8", // 私钥标准
+          format: "pem",
+        },
+      });
+    }
+    if (alg.startsWith("ES")) {
+      const map = {
+        ES256: "prime256v1",
+        ES384: "secp384r1",
+        ES512: "secp521r1",
+      };
+      return crypto.generateKeyPairSync("ec", {
+        namedCurve: map[alg],
+        publicKeyEncoding: {
+          type: "spki",
+          format: "pem",
+        },
+        privateKeyEncoding: {
+          type: "pkcs8",
+          format: "pem",
+        },
+      });
+    }
+    throw new Error("不支持的算法");
+  }
+}
+
+/** 测试用例 */
+// for (const alg of [
+//   "HS256",
+//   "HS384",
+//   "HS512",
+//   "ES256",
+//   "ES384",
+//   "ES512",
+//   "RS256",
+//   "RS384",
+//   "RS512",
+//   "PS256",
+//   "PS384",
+//   "PS512",
+// ]) {
+//   const jwt = new JWT(1000, alg);
+
+//   const times = alg.startsWith("HS") ? 50000 : 500;
+//   console.time(times + "次" + alg);
+//   for (let i = 0; i < times; i++) {
+//     const token = jwt.stringify({ userId: i, user: "admin" });
+//     const data = jwt.parse(token);
+//     if (jwt.verify(data) === false) throw new Error(alg + "校验失败");
+//   }
+//   console.timeEnd(times + "次" + alg);
+// }
