@@ -21,16 +21,16 @@ namespace WebServerType {
     T extends IWebServerApi,
     Method extends keyof IWebServerApi,
     Cookies extends RecordString,
-    JWTPayload extends RecordAny,
+    JWTPayload extends RecordAny
   > = <
     Route extends T[Method] extends undefined ? never : T[Method],
     Path extends keyof Route,
-    Obj extends Route[Path],
+    Obj extends Route[Path]
   >(
     pathname: Path,
     callback: (
-      params: IWebServerRequest<ExtractSearchParams<Obj>, ExtractReqBody<Obj>, Cookies, JWTPayload>,
-    ) => Promise<ExtractResBody<Obj>>,
+      params: IWebServerRequest<ExtractSearchParams<Obj>, ExtractReqBody<Obj>, Cookies, JWTPayload>
+    ) => Promise<ExtractResBody<Obj>>
   ) => void;
 }
 
@@ -53,7 +53,7 @@ export type IWebServerRequest<
   SearchParams extends RecordString,
   ReqBody extends RecordAny,
   Cookies extends RecordString,
-  JWTPayload extends RecordAny,
+  JWTPayload extends RecordAny
 > = {
   cookies: WebServerType.URLSearchParamsPlus<Cookies>;
   searchParams: WebServerType.URLSearchParamsPlus<SearchParams>;
@@ -72,7 +72,7 @@ export type IWebServerRequest<
     Path?: string,
     HttpOnly?: boolean,
     Secure?: boolean,
-    SameSite?: "strict" | "lax" | "none",
+    SameSite?: "strict" | "lax" | "none"
   ) => void;
 };
 export type IWebServerProps<JWTPayload extends RecordAny> = {
@@ -111,7 +111,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
   private async resolveRequest(
     callbacks: Array<(params: any) => Promise<any>>,
     request: http.IncomingMessage,
-    response: http.ServerResponse,
+    response: http.ServerResponse
   ) {
     let returnValue: any = undefined;
     const that = this;
@@ -138,7 +138,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
         if (!that.jwt) throw new Error("未设置JWT");
         const jwt: any = "Bearer " + that.jwt.stringify(jwtPayload);
         response.setHeader("authorization", jwt);
-        obj.setCookie("authorization", jwt, that.jwt.expTime);
+        obj.setCookie("authorization", jwt, that.jwt.expirationTime);
       },
       setCookie(key, value, MaxAge, Domain, Path, HttpOnly, Secure, SameSite) {
         let cookieStr = `${String(key)}=${encodeURIComponent(String(value))}; Path=${Path || "/"}; `;
@@ -209,7 +209,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
   private addRoute(
     method: string,
     pathname: any,
-    callback: (params: IWebServerRequest<any, any, any, any>) => Promise<any>,
+    callback: (params: IWebServerRequest<any, any, any, any>) => Promise<any>
   ) {
     const key = `${method} /${this.prefixPath}${pathname}`;
     const callbacks = this.routeMap.get(key) || [];
