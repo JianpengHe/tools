@@ -35,7 +35,7 @@ export class JWS<T extends Record<string, any>> {
     this.header = JSON.parse(String(JWS.base64urlDecode(this.headerRAW)));
     this.payload = JSON.parse(String(JWS.base64urlDecode(this.payloadRAW)));
   }
-  public verify(publicKey: string) {
+  public verify(publicKey: string, expectAlg: string) {
     const { exp, iat, nbf } = this.payload;
     const now = Date.now() / 1000;
 
@@ -44,6 +44,9 @@ export class JWS<T extends Record<string, any>> {
 
     const data: any = `${this.headerRAW}.${this.payloadRAW}`;
     const alg = String(this.header.alg || "").toUpperCase();
+    /** 期望的算法和实际算法不一致 */
+    if (expectAlg && expectAlg !== alg) return false;
+    /** 无算法 */
     if (!alg || alg === "none") return true;
     const algorithm = "sha" + alg.substring(2);
     const { signature } = this;
@@ -123,7 +126,7 @@ export class JWS<T extends Record<string, any>> {
 //   Console.showTitle("验证签名");
 //   const jws = new JWS(jwt);
 //   console.log("解析完成：", new JWS(jwt));
-//   console.log("校验结果：", jws.verify(publicKey));
+//   console.log("校验结果：", jws.verify(publicKey, alg));
 //   console.timeEnd(alg + "耗时");
 //   Console.showTitle("测试" + alg + " END");
 //   console.log("\n\n");
@@ -134,7 +137,7 @@ export class JWS<T extends Record<string, any>> {
 //   console.time(alg + "耗时");
 //   for (let i = 0; i < times; i++) {
 //     const jws = new JWS(JWS.sign({ aud: "PG" + i, userId: i }, KEY.privateKey, 1000, alg));
-//     if (!jws.verify(KEY.publicKey)) throw new Error("签名校验不通过");
+//     if (!jws.verify(KEY.publicKey, alg)) throw new Error("签名校验不通过");
 //   }
 //   console.timeEnd(alg + "耗时");
 // }
@@ -195,7 +198,7 @@ export class JWT<T extends Record<string, any> & JWTBasePayload> {
   public readonly publicKey: string;
   public readonly privateKey: string;
   public readonly expTime: number;
-  public readonly alg?: string;
+  public readonly alg: string;
   constructor(expTime: number, alg: string = "HS512", publicKey: string = "", privateKey: string = publicKey) {
     if (!publicKey) {
       const key = JWT.generateKey(alg);
@@ -214,7 +217,7 @@ export class JWT<T extends Record<string, any> & JWTBasePayload> {
     return new JWS<T>(token);
   }
   public verify(jwt: JWS<T>) {
-    return jwt.verify(this.publicKey);
+    return jwt.verify(this.publicKey, this.alg);
   }
   static generateKey(alg: string = "HS512") {
     if (alg.startsWith("HS")) {
