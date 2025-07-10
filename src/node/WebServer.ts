@@ -26,16 +26,16 @@ namespace WebServerType {
     T extends IWebServerApi,
     Method extends keyof IWebServerApi,
     Cookies extends RecordString,
-    JWTPayload extends RecordAny
+    JWTPayload extends RecordAny,
   > = <
     Route extends T[Method] extends undefined ? never : T[Method],
     Path extends keyof Route,
-    Obj extends Route[Path]
+    Obj extends Route[Path],
   >(
     pathName: Path,
     callback: (
-      params: IWebServerRequest<ExtractSearchParams<Obj>, ExtractReqBody<Obj>, Cookies, JWTPayload>
-    ) => Promise<ExtractResBody<Obj>>
+      params: IWebServerRequest<ExtractSearchParams<Obj>, ExtractReqBody<Obj>, Cookies, JWTPayload>,
+    ) => Promise<ExtractResBody<Obj>>,
   ) => void;
 }
 
@@ -60,7 +60,7 @@ export type IWebServerRequest<
   SearchParams extends RecordString,
   ReqBody extends RecordAny,
   Cookies extends RecordString,
-  JWTPayload extends RecordAny
+  JWTPayload extends RecordAny,
 > = {
   /** Cookie参数 */
   cookies: WebServerType.URLSearchParamsPlus<Cookies>;
@@ -89,7 +89,7 @@ export type IWebServerRequest<
     path?: string,
     httpOnly?: boolean,
     secure?: boolean,
-    sameSite?: "strict" | "lax" | "none"
+    sameSite?: "strict" | "lax" | "none",
   ) => void;
 };
 /** 服务器配置选项 */
@@ -141,7 +141,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
   private async resolveRequest(
     callbacks: Array<(params: any) => Promise<any>>,
     request: http.IncomingMessage,
-    response: http.ServerResponse
+    response: http.ServerResponse,
   ) {
     let responseData: any = undefined;
     const self = this;
@@ -217,6 +217,11 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
       for (const callback of callbacks) responseData = await callback(requestContext);
       for (const callback of this.afterRouteCallbacks) responseData = await callback(requestContext, responseData);
 
+      if (responseData === undefined) {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
       /** 格式化响应数据 */
       response.setHeader("Content-Type", "application/json;charset=utf-8");
       responseData = typeof responseData === "object" ? JSON.stringify(responseData) : String(responseData);
@@ -253,7 +258,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
   private addRoute(
     method: string,
     pathName: any,
-    callback: (params: IWebServerRequest<any, any, any, any>) => Promise<any>
+    callback: (params: IWebServerRequest<any, any, any, any>) => Promise<any>,
   ) {
     const routeKey = `${method} /${this.prefixPath}${pathName}`;
     const handlers = this.routeMap.get(routeKey) || [];
@@ -273,7 +278,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
 //   post: {
 //     login: {
 //       reqBody: { user: string; pwd: string };
-//       resBody: { success: boolean };
+//       // resBody: { success: boolean };
 //     };
 //   };
 // }
@@ -292,7 +297,7 @@ export class WebServer<T extends IWebServerApi, Cookies extends RecordString = {
 // webServer.post("login", async ({ reqBody, setJWT }) => {
 //   if (reqBody.user !== "admin" || reqBody.pwd !== "123456") throw new Error("账号密码不正确");
 //   setJWT({ userId: 666, user: reqBody.user });
-//   return { success: true };
+//   // return { success: true };
 // });
 
 // webServer.get("checkLogin", async ({ searchParams, jwt, cookies }) => {
