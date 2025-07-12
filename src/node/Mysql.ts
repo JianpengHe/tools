@@ -332,7 +332,7 @@ export class Mysql extends TypedEventEmitter<IMysqlEvents> {
   /** 底层Socket连接 */
   private socket?: net.Socket;
   /** 连接配置信息 */
-  private connectInfo: IMysqlConnect;
+  public readonly connectInfo: IMysqlConnect;
   /** 预处理语句映射表 */
   private prepareMap: Map<string, IMysqlPrepareResult> = new Map();
   /** 当前执行的任务 */
