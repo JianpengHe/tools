@@ -39,7 +39,7 @@ export const generateMysqlType = async (mysql: Mysql, dbName = mysql.dbName || m
   const namespaceName = `DB_${dbName.replace(/^[a-z]/, a => a.toUpperCase())}`;
   let o = `export const database = '${dbName}'\n`;
   o += `export const mysql = new Mysql({ ...con, database })\n\n`;
-  o += `export namespace ${namespaceName} = {\n`;
+  o += `export namespace ${namespaceName} {\n`;
   const res = (await mysql.query("select * from information_schema.columns where TABLE_SCHEMA = ?", [
     dbName,
   ])) as Record<string, IMysqlValue>[];
