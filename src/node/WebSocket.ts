@@ -100,7 +100,7 @@ export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
      */
     while (true) {
       // 每次外循环开始时，重置消息的操作码类型。
-      let opcode: EWebSocketOpcode = EWebSocketOpcode.Continuation;
+      let lastOpcode: EWebSocketOpcode = EWebSocketOpcode.Continuation;
       let recvBufferPromise: Promise<Buffer> | Buffer | undefined;
       let recvBuffer: Buffer | undefined;
 
@@ -110,9 +110,6 @@ export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
        * -----------------------------------------------------------------
        */
       while (true) {
-        recvBufferPromise = undefined;
-        recvBuffer = undefined;
-
         // 1. 读取并解析帧头 (前 2 个字节)
         recvBufferPromise = inputStream.readBuffer(2);
         recvBuffer = recvBufferPromise instanceof Promise ? await recvBufferPromise : recvBufferPromise;
@@ -122,7 +119,7 @@ export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
         const isFinalFrame = (firstByte & 0b10000000) !== 0; // 检查是否 >= 128
 
         // 获取操作码(Opcode)。如果为 0 (Continuation Frame)，则沿用上一个数据帧的 opcode。
-        opcode = firstByte & 0b00001111 || opcode;
+        const opcode = firstByte & 0b00001111 || lastOpcode;
 
         // 根据 WebSocket 规范，如果收到未知的 opcode，服务端必须关闭连接。
         if (EWebSocketOpcode[opcode] === undefined) {
@@ -209,6 +206,7 @@ export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
           console.warn("暂不支持的控制帧", opcode);
           break;
         }
+        lastOpcode = opcode;
 
         // 5.2. 如果载荷超大，切换到流式处理
         if (payloadLength > 0) {
