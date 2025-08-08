@@ -46,85 +46,85 @@ export declare interface TypedEventEmitter<Events extends EmittedEvents> {
    * @param event 事件名称
    * @param listener 事件处理函数
    */
-  addListener<E extends keyof Events>(event: E, listener: Events[E]): this;
+  addListener<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 触发事件
    * @param event 事件名称
    * @param args 传递给事件处理函数的参数
    */
-  emit<E extends keyof Events>(event: E, ...args: Parameters<Events[E]>): boolean;
+  emit<E extends keyof Events & (string | symbol)>(event: E, ...args: Parameters<Events[E]>): boolean;
 
   /**
    * 获取所有已注册事件的名称
    */
-  eventNames<E extends keyof Events>(): E[];
+  eventNames<E extends keyof Events & (string | symbol)>(): E[];
 
   /**
    * 获取指定事件的监听器数量
    * @param eventName 事件名称
    */
-  listenerCount<E extends keyof Events>(eventName: E): number;
+  listenerCount<E extends keyof Events & (string | symbol)>(eventName: E): number;
 
   /**
    * 获取指定事件的所有监听器
    * @param eventName 事件名称
    */
-  listeners<E extends keyof Events>(eventName: E): Events[E][];
+  listeners<E extends keyof Events & (string | symbol)>(eventName: E): Events[E][];
 
   /**
    * 移除事件监听器（同removeListener）
    * @param event 事件名称
    * @param listener 要移除的监听器函数
    */
-  off<E extends keyof Events>(event: E, listener: Events[E]): this;
+  off<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 添加事件监听器
    * @param event 事件名称
    * @param listener 事件处理函数
    */
-  on<E extends keyof Events>(event: E, listener: Events[E]): this;
+  on<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 添加一次性事件监听器，触发后自动移除
    * @param event 事件名称
    * @param listener 事件处理函数
    */
-  once<E extends keyof Events>(event: E, listener: Events[E]): this;
+  once<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 在监听器队列开头添加事件监听器
    * @param event 事件名称
    * @param listener 事件处理函数
    */
-  prependListener<E extends keyof Events>(event: E, listener: Events[E]): this;
+  prependListener<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 在监听器队列开头添加一次性事件监听器
    * @param event 事件名称
    * @param listener 事件处理函数
    */
-  prependOnceListener<E extends keyof Events>(event: E, listener: Events[E]): this;
+  prependOnceListener<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 移除指定事件的所有监听器
    * @param eventName 事件名称（可选）
    */
-  removeAllListeners<E extends keyof Events>(eventName?: E): this;
+  removeAllListeners<E extends keyof Events & (string | symbol)>(eventName?: E): this;
 
   /**
    * 移除指定的事件监听器
    * @param event 事件名称
    * @param listener 要移除的监听器函数
    */
-  removeListener<E extends keyof Events>(event: E, listener: Events[E]): this;
+  removeListener<E extends keyof Events & (string | symbol)>(event: E, listener: Events[E]): this;
 
   /**
    * 获取指定事件的原始监听器（包括包装器）
    * @param eventName 事件名称
    */
-  rawListeners<E extends keyof Events>(eventName: E): Events[E][];
+  rawListeners<E extends keyof Events & (string | symbol)>(eventName: E): Events[E][];
 }
 
 /**
