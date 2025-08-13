@@ -39,8 +39,8 @@ export class RecvStreamPro extends stream.Writable {
         if (this.isFinal) {
           /** 流结束了，但还有未完成的任务 */
           // console.log("流结束了，但还有未完成的任务", this.task, this.taskQueue, this.lastBuffer);
-          this.lastBuffer = Buffer.allocUnsafe(0);
           this.task.onData(this.task);
+          this.lastBuffer = Buffer.allocUnsafe(0);
           this.task.onEnd?.();
           this.task = undefined;
           continue;
@@ -332,4 +332,11 @@ export class RecvStreamPro extends stream.Writable {
 // console.log(await recvStreamPro.readBuffer(2));
 // console.log(2, recvStreamPro.readStream(800000000).pipe(fs.createWriteStream("43.bin")));
 // console.log(2, await recvStreamPro.readBuffer(8000));
+// })();
+
+// fs.createReadStream("4.bin").pipe(recvStreamPro);
+// (async () => {
+//   console.log(await recvStreamPro.readBuffer(200 * 1024), recvStreamPro.isFinal);
+//   console.log(await recvStreamPro.readBuffer(200 * 1024), recvStreamPro.isFinal);
+//   console.log(await recvStreamPro.readBuffer(200 * 1024), recvStreamPro.isFinal);
 // })();
