@@ -1,10 +1,10 @@
 import * as net from "net";
 import * as http from "http";
+import * as https from "https";
 import * as stream from "stream";
 import * as crypto from "crypto";
 import { RecvStreamPro } from "./RecvStreamPro";
 import { TypedEventEmitter } from "./utils";
-import { Buf } from "./Buf";
 
 // 定义WebSocket操作码的枚举类型
 export enum EWebSocketOpcode {
@@ -15,6 +15,7 @@ export enum EWebSocketOpcode {
   "Ping" = 9, // 表示Ping控制帧
   "Pong" = 10, // 表示Pong控制帧
 }
+const checkIsControlFrame = (opcode: EWebSocketOpcode) => opcode >= EWebSocketOpcode.Close;
 
 // 定义WebSocket事件接口类型
 export type IWebSocketEvents = {
@@ -35,11 +36,6 @@ export type IWebSocketEvents = {
 export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
   // 锁，用于防止 recvData 方法被并发或重复调用。
   private isLocked = false;
-
-  constructor() {
-    super();
-  }
-
   /**
    * 启动接收和解析来自客户端的 WebSocket 数据帧的循环。
    * @param socket 底层的 net.Socket 连接实例。
@@ -162,7 +158,7 @@ export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
 
         // 4. 读取载荷数据 (Payload Data) 并处理
         const isTextFrame = opcode === EWebSocketOpcode.Text;
-        const isControlFrame = opcode >= EWebSocketOpcode.Close; // 控制帧 (Close, Ping, Pong)
+        const isControlFrame = checkIsControlFrame(opcode); // 控制帧 (Close, Ping, Pong)
         const maxAllowedBufferSize = Number(isTextFrame ? maxTextSize : maxBufferSize) - fragmentsTotalLength;
 
         // 计算本次应从流中读取的字节数。
@@ -274,15 +270,123 @@ export class WebSocketRecv extends TypedEventEmitter<IWebSocketEvents> {
   }
 }
 
+export class WebSocketSend {
+  private readonly socket: net.Socket;
+  private readonly useMask: boolean;
+  private readonly sendHighWaterMark: number;
+
+  constructor(socket: net.Socket, useMask = false, sendHighWaterMark = 64 * 1024) {
+    if (sendHighWaterMark > 1 * 1024 * 1024 * 1024) throw new Error("sendHighWaterMark must be less than 1GB");
+    if (sendHighWaterMark <= 0) throw new Error("sendHighWaterMark must be greater than 0");
+    this.socket = socket;
+    this.useMask = useMask;
+    this.sendHighWaterMark = sendHighWaterMark;
+  }
+
+  // 发送队列，存储待发送的数据
+  private queue: { data: Buffer | RecvStreamPro; opcode: EWebSocketOpcode; isStart: boolean }[] = [];
+
+  // 优先队列
+  private priorityQueue: { data: Buffer; opcode: EWebSocketOpcode; isStart: boolean }[] = [];
+
+  // 发送忙碌标志
+  private busy = false;
+
+  // 发送数据的方法
+  public send(
+    data: string | Buffer | stream.Readable,
+    opcode: EWebSocketOpcode = typeof data === "string" ? EWebSocketOpcode.Text : EWebSocketOpcode.Binary,
+  ) {
+    if (checkIsControlFrame(opcode)) {
+      if (data instanceof stream.Readable) throw new Error("控制帧不支持流");
+      this.priorityQueue.push({ data: Buffer.isBuffer(data) ? data : Buffer.from(data), opcode, isStart: true });
+    } else {
+      const curData: Buffer | RecvStreamPro =
+        data instanceof stream.Readable
+          ? data.pipe(new RecvStreamPro())
+          : Buffer.isBuffer(data)
+            ? data
+            : Buffer.from(data);
+      this.queue.push({ data: curData, opcode, isStart: true });
+    }
+    this.tryToCleanQueue();
+    return this;
+  }
+  /**
+   * 尝试清理发送队列
+   */
+  private async tryToCleanQueue() {
+    // 如果正在发送或队列为空，直接返回
+    if (this.busy) return;
+    // 设置发送忙碌标志
+    this.busy = true;
+    while (true) {
+      // 从队列中取出一个任务
+      const task = this.priorityQueue.shift() ?? this.queue.shift();
+      if (!task) {
+        this.busy = false;
+        return;
+      }
+      const isStart = task.isStart;
+      let isFinal = true;
+      let buffer: Buffer;
+      if (task.data instanceof RecvStreamPro) {
+        const bufferPromise = task.data.readBuffer(this.sendHighWaterMark);
+        buffer = bufferPromise instanceof Promise ? await bufferPromise : bufferPromise;
+        if (!task.data.isFinal) {
+          task.isStart = false;
+          this.queue.unshift(task);
+          isFinal = false;
+        }
+      } else {
+        buffer = task.data;
+      }
+      const bufferSize = buffer.length;
+      const headBuf = Buffer.alloc(14);
+      let index = 0;
+
+      headBuf[index++] = isStart ? task.opcode : EWebSocketOpcode.Continuation;
+      if (isFinal) headBuf[0] |= 128;
+
+      // 根据数据长度设置长度字段
+      if (bufferSize < 126) {
+        // 如果长度小于126，直接使用1字节表示
+        headBuf[index++] = bufferSize;
+      } else if (bufferSize < 65536) {
+        // 如果长度小于65536，使用3字节表示（1字节为126，2字节为长度）
+        headBuf[index++] = 126;
+        headBuf.writeUInt16BE(bufferSize, index);
+        index += 2;
+      } else {
+        // 如果长度大于等于65536，使用9字节表示（1字节为127，8字节为长度）
+        headBuf[index++] = 127;
+        headBuf.writeBigUint64BE(BigInt(bufferSize), index);
+        index += 8;
+      }
+      if (this.useMask) {
+        headBuf[1] |= 128;
+        const maskKey = crypto.randomBytes(4);
+        maskKey.copy(headBuf, index);
+        index += 4;
+        new WebSocketMaskApplier([...maskKey], bufferSize).apply(buffer);
+      }
+      const s1 = this.socket.write(headBuf.subarray(0, index));
+      const s2 = this.socket.write(buffer);
+      if (s1 === false || s2 === false) await new Promise(resolve => this.socket.once("drain", resolve));
+    }
+  }
+}
+
 // WebSocket类，继承自TypedEventEmitter，实现WebSocket协议
-export class WebSocket extends WebSocketRecv {
+export class WebSocketServer extends WebSocketRecv {
   // 标识当前连接是否是WebSocket连接
   public isWebSocket = false;
   // 底层TCP套接字
   private socket: net.Socket;
-  // 接收数据的流
-  // WebSocket选项配置
-  public opts: { maxTextSize?: number; maxBufferSize?: number; sendHighWaterMark?: number };
+  // 发送数据的对象
+  public send: WebSocketSend["send"] = () => {
+    throw new Error("websocket not connected");
+  };
 
   /**
    * 构造函数，初始化WebSocket连接
@@ -290,170 +394,36 @@ export class WebSocket extends WebSocketRecv {
    * @param res HTTP响应对象
    * @param opts WebSocket选项配置
    */
-  constructor(req: http.IncomingMessage, res: http.ServerResponse, opts?: WebSocket["opts"]) {
+  constructor(
+    req: http.IncomingMessage,
+    opts?: { maxTextSize?: number; maxBufferSize?: number; sendHighWaterMark?: number },
+  ) {
     super();
-    // 初始化选项配置
-    this.opts = opts || {};
-
-    // 设置发送缓冲区大小，默认为64KB
-    this.opts.sendHighWaterMark = this.opts.sendHighWaterMark ?? 64 * 1024;
     // 获取底层TCP套接字
     this.socket = req.socket;
     // 检查是否是WebSocket升级请求
-    if (req.headers.connection === "Upgrade" && req.headers["sec-websocket-key"]) {
-      // 发送101状态码，表示切换协议
-      res.writeHead(101, {
-        Upgrade: "websocket",
-        Connection: "Upgrade",
-        // 根据WebSocket协议计算Sec-WebSocket-Accept响应头
-        "Sec-WebSocket-Accept": crypto
-          .createHash("sha1")
-          .update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-          .digest("base64"),
-      });
-      // 刷新响应头
-      res.flushHeaders();
 
-      // 恢复套接字数据流
-      // this.socket.resume();
-      // 标记为WebSocket连接
-      this.isWebSocket = true;
-      // 在下一个事件循环中触发connected事件并开始接收数据
-      process.nextTick(() => {
-        this.recvData(req.socket, opts?.maxTextSize, opts?.maxBufferSize);
-      });
-      this.on("ping", buffer => {
-        // 收到对面的Ping，要回一个Pong
-        this.socket.write(Buffer.concat([Buffer.from([EWebSocketOpcode.Pong | 0x80, buffer.length]), buffer]));
-      });
-      this.on("pong", buffer => {
-        // 对面回了Pong帧，调用对应的回调函数（私有协议）
-        if (buffer.length === 4) this.pingCallBacks.get(buffer.readUInt32BE()!)?.();
-      });
-      // 监听套接字关闭事件
-      this.socket.once("close", () => this.emit("close"));
-    } else {
-      // 如果不是WebSocket升级请求，触发关闭事件
-      this.emit("close");
+    // 标记为WebSocket连接
+    this.isWebSocket = WebSocketServer.handleUpgrade(req, this.socket);
+    if (this.isWebSocket) {
+      const webSocketSend = new WebSocketSend(this.socket, false, opts?.sendHighWaterMark);
+      this.send = webSocketSend.send.bind(webSocketSend);
     }
-  }
+    // 在下一个事件循环中触发connected事件并开始接收数据
+    process.nextTick(() => {
+      this.recvData(req.socket, opts?.maxTextSize, opts?.maxBufferSize);
+    });
 
-  // 发送队列，存储待发送的数据
-  private sendQueue: (Buffer | stream.Readable | string)[] = [];
-  // 发送忙碌标志
-  public sendBusy = false;
-
-  /**
-   * 发送数据
-   * @param data 要发送的数据，可以是Buffer、Readable流或字符串
-   * @returns this，用于链式调用
-   */
-  public send(data: Buffer | stream.Readable | string) {
-    // 将数据添加到发送队列
-    this.sendQueue.push(data);
-    // 尝试清理队列
-    this.tryToCleanQueue();
-    return this;
-  }
-
-  /**
-   * 尝试清理发送队列
-   */
-  private async tryToCleanQueue() {
-    // 如果正在发送或队列为空，直接返回
-    if (this.sendBusy || this.sendQueue.length === 0) {
-      return;
-    }
-    // 设置发送忙碌标志
-    this.sendBusy = true;
-    // 从队列中取出一个任务
-    const task = this.sendQueue.shift()!;
-    // 是否是第一个分片的标志
-    let isStart = true;
-
-    /**
-     * 创建WebSocket帧头部
-     * @param type 操作码类型
-     * @param len 数据长度
-     * @returns 包含头部的Buf对象
-     */
-    const makeHeadBuf = (type: number, len: number) => {
-      const buf = new Buf();
-      if (isStart) {
-        // 如果是第一个分片，设置操作码
-        buf.writeUIntBE(type, 1);
-        isStart = false;
-      } else {
-        // 如果不是第一个分片，操作码为0（延续帧）
-        buf.writeUIntBE(0, 1);
-      }
-
-      // 根据数据长度设置长度字段
-      if (len < 126) {
-        // 如果长度小于126，直接使用1字节表示
-        buf.writeUIntBE(len, 1);
-      } else if (len < 65536) {
-        // 如果长度小于65536，使用3字节表示（1字节为126，2字节为长度）
-        buf.writeUIntBE(126, 1).writeUIntBE(len, 2);
-      } else {
-        // 如果长度大于等于65536，使用9字节表示（1字节为127，8字节为长度）
-        buf.writeUIntBE(127, 1).writeUIntBE(len, 8);
-      }
-      return buf;
-    };
-
-    // 处理不同类型的数据
-    if (task instanceof stream.Readable) {
-      // 如果是可读流，监听data事件
-      task.on("data", chunk => {
-        // 发送数据
-        if (!this.socket.write(Buffer.concat([makeHeadBuf(2, chunk.length).buffer, chunk]))) {
-          // 如果套接字缓冲区已满，暂停流
-          task.pause();
-          // 当套接字缓冲区可用时，恢复流
-          this.socket.once("drain", () => task.resume());
-        }
-      });
-
-      // 监听end事件
-      task.on("end", () => {
-        // 发送结束帧
-        this.socket.write(Buffer.from([128, 0]));
-        // 重置发送忙碌标志
-        this.sendBusy = false;
-        // 尝试清理队列
-        this.tryToCleanQueue();
-      });
-    } else {
-      // 如果是文本或Buffer
-      const isText = !(task instanceof Object);
-      // 创建数据缓冲区
-      const dataBuf = new Buf(Buffer.from(task));
-
-      // 分片发送数据
-      while (dataBuf.offset < dataBuf.buffer.length) {
-        // 读取一个分片
-        const chunk = dataBuf.read(Number(this.opts.sendHighWaterMark));
-        // 创建帧头部
-        const buf = makeHeadBuf(isText ? 1 : 2, chunk.length);
-
-        // 如果是最后一个分片，设置FIN标志
-        if (dataBuf.offset === dataBuf.buffer.length) {
-          buf.buffer[0] += 128;
-        }
-
-        // 发送数据
-        if (!this.socket.write(Buffer.concat([buf.buffer, chunk]))) {
-          // 如果套接字缓冲区已满，等待drain事件
-          await new Promise(resolve => this.socket.once("drain", resolve));
-        }
-      }
-
-      // 重置发送忙碌标志
-      this.sendBusy = false;
-      // 尝试清理队列
-      this.tryToCleanQueue();
-    }
+    this.on("ping", buffer => {
+      // 收到对面的Ping，要回一个Pong
+      this.send(buffer, EWebSocketOpcode.Pong);
+    });
+    this.on("pong", buffer => {
+      // 对面回了Pong帧，调用对应的回调函数（私有协议）
+      if (buffer.length === 4) this.pingCallBacks.get(buffer.readUInt32BE()!)?.();
+    });
+    // 监听套接字关闭事件
+    this.socket.once("close", () => this.emit("close"));
   }
 
   /**
@@ -464,10 +434,11 @@ export class WebSocket extends WebSocketRecv {
   public ping = (timeout: number = 5000) =>
     new Promise((resolve, reject) => {
       // 生成随机数作为Ping的标识
-      let rand = 0;
+      let rand: number = 0;
+      let randBuffer: Buffer;
       do {
-        rand = ((Math.random() * 1e11) | 0) - (1 << 31);
-      } while (this.pingCallBacks.has(rand));
+        randBuffer = crypto.randomBytes(4);
+      } while (this.pingCallBacks.has((rand = randBuffer.readUInt32BE())));
 
       // 设置超时定时器
       const timer = setTimeout(() => {
@@ -488,21 +459,122 @@ export class WebSocket extends WebSocketRecv {
         // 解析Promise，返回延迟时间
         resolve(performance.now() - time);
       });
-
-      // 创建Ping帧
-      const buf = new Buf();
-      buf.writeUIntBE(0x89, 1); // 0x89 = 10001001，表示Ping帧且FIN为1
-      buf.writeUIntBE(4, 1); // 数据长度为4字节
-      buf.writeUIntBE(rand, 4); // 写入随机数
-      console.log(buf.buffer);
-      // 发送Ping帧
-      this.socket.write(buf.buffer);
       // 记录发送时间
       const time = performance.now();
+      this.send(randBuffer, EWebSocketOpcode.Ping);
     });
 
   // 存储Ping回调的Map，键为随机数，值为回调函数
   private pingCallBacks: Map<number, () => void> = new Map();
+
+  static handleUpgrade(req: http.IncomingMessage, socket: net.Socket) {
+    // 1. 检查请求头是否是 WebSocket 升级请求
+    if (req.headers["upgrade"] !== "websocket") {
+      socket.end("HTTP/1.1 400 Bad Request");
+      return false;
+    }
+
+    // 2. 读取客户端发送的 Sec-WebSocket-Key
+    const clientKey = req.headers["sec-websocket-key"];
+
+    // 3. 计算服务器的 Sec-WebSocket-Accept 响应
+    // 这是 WebSocket 协议规定的握手签名算法
+    const magicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    const acceptKey = crypto
+      .createHash("sha1")
+      .update(clientKey + magicString)
+      .digest("base64");
+
+    // 4. 构造并写入 HTTP 101 响应头
+    // 注意：我们是直接写入一个字符串到 socket 中
+    const responseHeaders = [
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${acceptKey}`,
+      "", // 空行表示头部的结束
+      "", // 再一个空行结束
+    ].join("\r\n");
+
+    socket.write(responseHeaders);
+    return true;
+  }
+}
+
+export class WebSocket extends WebSocketRecv {
+  private socket: net.Socket | undefined;
+  public send: WebSocketSend["send"] = () => {
+    throw new Error("websocket not connected");
+  };
+  constructor(url: string) {
+    super();
+
+    const urlParsed = new URL(url);
+    if (urlParsed.protocol !== "ws:" && urlParsed.protocol !== "wss:") {
+      throw new Error("Invalid WebSocket URL protocol. Must be ws: or wss:");
+    }
+
+    // 1. 生成客户端握手密钥 (Sec-WebSocket-Key)
+    const clientKey = crypto.randomBytes(16).toString("base64");
+
+    // 2. 准备 HTTP Upgrade 请求
+    const options: http.RequestOptions = {
+      hostname: urlParsed.hostname,
+      port: urlParsed.port || 80,
+      path: urlParsed.pathname + urlParsed.search,
+      method: "GET",
+      headers: {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": clientKey,
+      },
+    };
+
+    const req = urlParsed.protocol === "ws:" ? http.request(options) : https.request(options);
+
+    // 3. 监听 'upgrade' 事件，这是握手成功的标志
+    req.on("upgrade", (res, socket, head) => {
+      // 4. 验证服务器的响应密钥 (Sec-WebSocket-Accept)
+      const expectedAcceptKey = crypto
+        .createHash("sha1")
+        .update(clientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11") // 使用标准 Magic String
+        .digest("base64");
+
+      if (res.headers["sec-websocket-accept"] !== expectedAcceptKey) {
+        socket.destroy();
+        this.emit("error", new Error("Invalid Sec-WebSocket-Accept key."));
+        return;
+      }
+
+      // 握手成功！
+      this.socket = socket;
+
+      // 重要：为客户端创建一个 WebSocketSend 实例，并设置 useMask = true
+      // 客户端发送数据必须加掩码
+      const webSocketSend = new WebSocketSend(this.socket, true);
+      this.send = webSocketSend.send.bind(webSocketSend);
+
+      // 开始接收服务端的数据帧 (此时不应该有掩码)
+      // super.recvData 是从 WebSocketRecv 继承来的
+      this.recvData(this.socket);
+
+      // 监听 ping 并自动回复 pong
+      this.on("ping", buffer => {
+        this.send(buffer, EWebSocketOpcode.Pong);
+      });
+
+      // 监听 socket 关闭事件
+      socket.once("close", () => this.emit("close"));
+    });
+
+    req.on("error", err => {
+      this.emit("error", err);
+    });
+
+    // 发送请求
+    req.end();
+  }
 }
 
 /**
@@ -511,7 +583,7 @@ export class WebSocket extends WebSocketRecv {
  * 该类用于将一个 4 字节的掩码密钥持续应用到一个数据流上。
  * 它会记住当前掩码的位置，以便在处理分块数据时能够正确地继续应用掩码。
  */
-export class WebSocketMaskApplier {
+class WebSocketMaskApplier {
   // 存储 4 字节的掩码密钥
   private readonly maskingKey: number[];
 
@@ -600,38 +672,54 @@ export class WebSocketMaskApplier {
   }
 }
 
-// new WebSocketRecv().on("subStream", () => {});
-
 // 测试用例
-http
-  .createServer((req, res) => {
-    const t = new WebSocket(req, res, {})
-      .on("subStream", (subStream, isText) => {
-        console.log("subStream----------------------------------", isText);
 
-        // let t = 0;
-        // subStream.on("data", c => console.log("收到", (t += c.length)));
-
-        // subStream.on("end", () => console.log("结束", t));
-        subStream.pipe(require("fs").createWriteStream("ttt.bin"));
-      })
-      .on("text", txt => {
-        console.log("文字", txt.length, txt);
-      })
-      .on("binary", txt => {
-        console.log("binary", txt);
-      })
-      .on("connected", () => {
-        //t.send(require("fs").createReadStream("ttt.bin"));
-        // t.send("1234567890".repeat(1024 * 10));
-        setTimeout(() => {
-          t.ping().then(delay => console.log("与客户端延迟：", delay, "ms"));
-        }, 500);
-      })
-      .on("ping", buf => console.log("ping", buf))
-      .on("error", e => {
-        console.log(e);
-      });
-    t.isWebSocket || res.end("404");
-  })
-  .listen(80);
+/** websocket 服务器 */
+// http
+//   .createServer((req, res) => {
+//     res.end("404");
+//   })
+//   .on("upgrade", (req, socket, head) => {
+//     const websocket = new WebSocketServer(req)
+//       .on("subStream", (subStream, isText) => {
+//         console.log("subStream----------------------------------", isText);
+//         subStream.pipe(require("fs").createWriteStream("ttt.bin"));
+//       })
+//       .on("text", txt => {
+//         console.log("服务端收到文字", txt.length, txt);
+//       })
+//       .on("binary", txt => {
+//         console.log("服务端收到binary", txt);
+//       })
+//       .on("connected", () => {
+//         //t.send(require("fs").createReadStream("ttt.bin"));
+//         // t.send("1234567890".repeat(1024 * 10));
+//         setTimeout(() => {
+//           websocket.ping().then(delay => console.log("与客户端延迟：", delay, "ms"));
+//           websocket.send("1234567890".repeat(1024));
+//           websocket.send(require("fs").createReadStream("ttt.bin"));
+//           websocket.send("1234", EWebSocketOpcode.Ping);
+//         }, 500);
+//       })
+//       .on("ping", buf => console.log("ping", buf))
+//       .on("pong", buf => console.log("pong", buf))
+//       .on("error", e => {
+//         console.log(e);
+//       });
+//   })
+//   .listen(80, () => {
+//     console.log("listen 80");
+//     /** websocket 客户端 */
+//     const ws = new WebSocket("ws://127.0.0.1:80");
+//     ws.on("text", txt => console.log("客户端收到文字", txt.length, txt));
+//     ws.on("subStream", async (subStream, isText) => {
+//       console.log("客户端收到subStream", isText);
+//       const chunks: Buffer[] = [];
+//       for await (const chunk of subStream) chunks.push(chunk);
+//       const data = Buffer.concat(chunks);
+//       console.log("subStream end", data.length);
+//     });
+//     ws.on("connected", () => {
+//       ws.send("123".repeat(1024));
+//     });
+//   });
