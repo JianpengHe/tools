@@ -51,7 +51,7 @@ export type IHttpProxyRes = {
 
 /** 根据代理规则匹配成功后，处理和篡改请求或响应的回调函数 */
 export type IHttpProxyFn = (
-  localReq: IHttpProxyReq,
+  localReq: IHttpProxyReq
 ) => AsyncGenerator<Partial<IHttpProxyReq> | null | undefined, Partial<IHttpProxyRes> | undefined, IHttpProxyRes>;
 
 /** 代理规则，返回一个布尔值代表这个请求是否需要拦截 */
@@ -97,7 +97,7 @@ export type IHttpProxyOpt = {
     | ((
         hostname: string,
         port: number,
-        operatingSystemHttpProxys: Required<IOperatingSystemHttpProxyOpt>[],
+        operatingSystemHttpProxys: Required<IOperatingSystemHttpProxyOpt>[]
       ) => Promise<net.Socket>); // false
 
   /** 禁用一般的日志输出控制台 */
@@ -148,7 +148,7 @@ export class HttpProxy {
             reject(e);
           }
         })
-        .once("error", reject),
+        .once("error", reject)
     );
   };
 
@@ -197,7 +197,7 @@ export class HttpProxy {
     try {
       this.hostsOriginalIpMap.set(
         hostname,
-        net.isIPv4(hostname) ? hostname : (await dns.promises.resolve4(hostname))[0] || "",
+        net.isIPv4(hostname) ? hostname : (await dns.promises.resolve4(hostname))[0] || ""
       );
     } catch (e) {
       console.log("添加失败", hostname, e);
@@ -225,11 +225,11 @@ export class HttpProxy {
         this.opt.disableLog ||
           console.log(
             "读取PAC脚本",
-            this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : "",
+            this.opt.showProcessName ? await getProcessNameByPort(req.socket.remotePort, req.socket.localPort) : ""
           );
         /** 以前的代理IP */
         const oldProxyIp = ((await this.initialOperatingSystemHttpProxys) || []).find(
-          ({ status, proxyIp }) => status & 0b0011 && proxyIp,
+          ({ status, proxyIp }) => status & 0b0011 && proxyIp
         )?.proxyIp;
         res.end(`function FindProxyForURL(url, host) {
         if (${
@@ -428,15 +428,15 @@ export class HttpProxy {
       const { useSystemProxy } = this;
       if (useSystemProxy) {
         requestOptions.createConnection = ({ hostname }, oncreate: (err: Error | null, socket: net.Socket) => void) => {
-          hostname = rawHostname || hostname || "";
+          const newHostname = rawHostname || hostname || "";
           const port = Number(httpProxyReq.url.port || (url.protocol === "https:" ? 443 : 80));
           this.initialOperatingSystemHttpProxys?.then(async operatingSystemHttpProxys => {
             (useSystemProxy === true ? this.operatingSystemHttpProxy.getHttpProxySocket : useSystemProxy)(
-              hostname,
+              newHostname,
               port,
-              operatingSystemHttpProxys,
+              operatingSystemHttpProxys
             ).then(socket =>
-              oncreate(null, url.protocol === "https:" ? tls.connect({ servername: hostname, socket }) : socket),
+              oncreate(null, url.protocol === "https:" ? tls.connect({ servername: newHostname, socket }) : socket)
             );
           });
           return undefined;
@@ -482,7 +482,7 @@ export class HttpProxy {
                     resolve(true);
                     delete httpProxyRes.headers["content-encoding"];
                     httpProxyRes.body = buf;
-                  }),
+                  })
                 ))
               ) {
                 res.statusCode = 500;
@@ -525,7 +525,7 @@ export class HttpProxy {
            * 监听目标服务器响应的错误事件
            */
           remoteRes.once("error", console.error);
-        },
+        }
       );
 
       /**
@@ -563,9 +563,9 @@ export class HttpProxy {
           ...(this.opt.showProcessName
             ? [await getProcessNameByPort(req.socket.remotePort, req.socket.localPort), "\t"]
             : []),
-          String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : ""),
+          String(showUrl).substring(0, 100) + (String(showUrl).length > 100 ? "..." : "")
         );
-    },
+    }
   );
 
   /**
@@ -591,7 +591,7 @@ export class HttpProxy {
   constructor(
     hosts: string[],
     opt: IHttpProxyOpt = {},
-    certificateCenter: HttpProxy["certificateCenter"] = new URL("https://tool.hejianpeng.cn/certificate/"),
+    certificateCenter: HttpProxy["certificateCenter"] = new URL("https://tool.hejianpeng.cn/certificate/")
   ) {
     this.hosts = hosts || [];
     this.routeMap = opt?.routeMap || new Map();
@@ -623,9 +623,9 @@ export class HttpProxy {
                 return;
               }
               resolve(addresses);
-            }),
-          ) as Promise<string>,
-      ),
+            })
+          ) as Promise<string>
+      )
     ).then(async ips => {
       /**
        * 获取所有需要代理的域名的IP地址
@@ -646,7 +646,7 @@ export class HttpProxy {
               "的IP地址和绑定端口不能与代理地址(",
               opt.proxyBindIp,
               opt.proxyBindPort,
-              ")相同",
+              ")相同"
             );
             throw new TypeError("请关闭其他正在运行的HttpProxy或DnsServer");
           }
@@ -657,7 +657,7 @@ export class HttpProxy {
       if (typeof this.certificateCenter !== "function") {
         console.log("\t");
         console.warn(
-          `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}，否则不支持HTTPS\x1B[0m`,
+          `\x1B[44m\x1B[37m【重要提示】使用前请先下载并安装CA根证书，下载地址${this.certificateCenter}，否则不支持HTTPS\x1B[0m`
         );
       }
 
@@ -699,7 +699,7 @@ export class HttpProxy {
                 ? await this.operatingSystemHttpProxy.getHttpProxySocket(
                     host,
                     port,
-                    await this.initialOperatingSystemHttpProxys,
+                    await this.initialOperatingSystemHttpProxys
                   )
                 : net.connect({ host, port });
               remoteSock.on("error", () => socket.end());
@@ -720,7 +720,7 @@ export class HttpProxy {
                 new tls.TLSSocket(socket, {
                   isServer: true,
                   secureContext: await this.createSecureContext(host),
-                }),
+                })
               );
             } catch (e) {
               socket.end();
@@ -760,10 +760,10 @@ export class HttpProxy {
            * 如果未启用自动配置，输出手动配置系统代理的指南
            */
           console.log(
-            `\x1B[32m*** 若需使用普通代理模式，请进入系统设置代理服务器${opt.proxyBindIp}:${opt.proxyBindPort}\x1B[0m`,
+            `\x1B[32m*** 若需使用普通代理模式，请进入系统设置代理服务器${opt.proxyBindIp}:${opt.proxyBindPort}\x1B[0m`
           );
           console.log(
-            `\x1B[32m*** 若需使用PAC模式，请设置代理服务器"使用设置脚本"→"脚本地址"输入：http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}\x1B[0m`,
+            `\x1B[32m*** 若需使用PAC模式，请设置代理服务器"使用设置脚本"→"脚本地址"输入：http://${opt.proxyBindIp}:${opt.proxyBindPort}/pg_pac_script_config/${this.token}\x1B[0m`
           );
         }
       } else {
@@ -794,7 +794,7 @@ export class HttpProxy {
           sock => {
             /** 丢给this.proxyServer进行解析和对外请求 */
             this.proxyServer.emit("connection", sock);
-          },
+          }
         );
 
         /**
@@ -826,7 +826,7 @@ export class HttpProxy {
               port,
               connectionListener,
               localIPStartPos: 0,
-            }),
+            })
           );
         });
 
@@ -866,8 +866,8 @@ export class HttpProxy {
                       port,
                       connectionListener,
                       localIPStartPos: 0,
-                    }),
-                  ),
+                    })
+                  )
                 );
                 proxyMode.add(tcpProxy.localIPtoString(tcpProxy.routeMap.get(RDATA) || 0), QNAME);
               } catch (e) {
