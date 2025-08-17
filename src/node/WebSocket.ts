@@ -295,7 +295,7 @@ export class WebSocketSend {
   // 发送数据的方法
   public send(
     data: string | Buffer | stream.Readable,
-    opcode: EWebSocketOpcode = typeof data === "string" ? EWebSocketOpcode.Text : EWebSocketOpcode.Binary,
+    opcode: EWebSocketOpcode = typeof data === "string" ? EWebSocketOpcode.Text : EWebSocketOpcode.Binary
   ) {
     if (checkIsControlFrame(opcode)) {
       if (data instanceof stream.Readable) throw new Error("控制帧不支持流");
@@ -305,8 +305,8 @@ export class WebSocketSend {
         data instanceof stream.Readable
           ? data.pipe(new RecvStreamPro())
           : Buffer.isBuffer(data)
-            ? data
-            : Buffer.from(data);
+          ? data
+          : Buffer.from(data);
       this.queue.push({ data: curData, opcode, isStart: true });
     }
     this.tryToCleanQueue();
@@ -396,7 +396,7 @@ export class WebSocketServer extends WebSocketRecv {
    */
   constructor(
     req: http.IncomingMessage,
-    opts?: { maxTextSize?: number; maxBufferSize?: number; sendHighWaterMark?: number },
+    opts?: { maxTextSize?: number; maxBufferSize?: number; sendHighWaterMark?: number }
   ) {
     super();
     // 获取底层TCP套接字
@@ -506,7 +506,11 @@ export class WebSocket extends WebSocketRecv {
   public send: WebSocketSend["send"] = () => {
     throw new Error("websocket not connected");
   };
-  constructor(url: string) {
+  constructor(
+    url: string,
+    httpOptions?: https.RequestOptions,
+    opts?: { maxTextSize?: number; maxBufferSize?: number; sendHighWaterMark?: number }
+  ) {
     super();
 
     const urlParsed = new URL(url);
@@ -518,20 +522,22 @@ export class WebSocket extends WebSocketRecv {
     const clientKey = crypto.randomBytes(16).toString("base64");
 
     // 2. 准备 HTTP Upgrade 请求
-    const options: http.RequestOptions = {
+    const newOptions: https.RequestOptions = {
       hostname: urlParsed.hostname,
-      port: urlParsed.port || 80,
+      port: urlParsed.port || (urlParsed.protocol === "wss:" ? 443 : 80),
       path: urlParsed.pathname + urlParsed.search,
       method: "GET",
+      ...httpOptions,
       headers: {
         Connection: "Upgrade",
         Upgrade: "websocket",
         "Sec-WebSocket-Version": "13",
         "Sec-WebSocket-Key": clientKey,
+        ...httpOptions?.headers,
       },
     };
 
-    const req = urlParsed.protocol === "ws:" ? http.request(options) : https.request(options);
+    const req = urlParsed.protocol === "ws:" ? http.request(newOptions) : https.request(newOptions);
 
     // 3. 监听 'upgrade' 事件，这是握手成功的标志
     req.on("upgrade", (res, socket, head) => {
@@ -552,12 +558,13 @@ export class WebSocket extends WebSocketRecv {
 
       // 重要：为客户端创建一个 WebSocketSend 实例，并设置 useMask = true
       // 客户端发送数据必须加掩码
-      const webSocketSend = new WebSocketSend(this.socket, true);
+      const webSocketSend = new WebSocketSend(this.socket, true, opts?.sendHighWaterMark);
+
       this.send = webSocketSend.send.bind(webSocketSend);
 
       // 开始接收服务端的数据帧 (此时不应该有掩码)
       // super.recvData 是从 WebSocketRecv 继承来的
-      this.recvData(this.socket);
+      this.recvData(this.socket, opts?.maxTextSize, opts?.maxBufferSize);
 
       // 监听 ping 并自动回复 pong
       this.on("ping", buffer => {
