@@ -95,42 +95,63 @@ async function staticWebServerPlugin(
       res.setHeader("Last-Modified", fileLastModified);
     }
 
-    const range =
-      String(req.headers.range || "")
-        .toLowerCase()
-        .match(/^bytes=(\d+)-(\d+)$/) || [];
-    if (range[1]) {
-      const start = Number(range[1]);
-      const end = Math.min(size, Number(range[2] || Infinity) + 1);
-
-      res.statusCode = 206;
-      res.setHeader("Content-Range", `bytes ${start}-${end - 1}/${size}`);
-      res.setHeader("Content-Length", Math.abs(start - end));
-      fs.createReadStream(filePath, { start, end }).pipe(res);
-      return res.statusCode;
-    } else {
-      res.setHeader("Content-Length", size);
-      fs.createReadStream(filePath).pipe(res);
-    }
-
     const { base } = path.parse(filePath);
 
     if (
-      !Object.entries({ ".html": `text/html; charset=utf-8`, ".wasm": "application/wasm", ...opt?.MimeTypes }).some(
-        ([ext, header]) => {
-          if (filePath.endsWith(ext)) {
-            res.setHeader("Content-type", header);
-            return true;
-          }
-          return false;
-        },
-      )
+      !Object.entries({
+        ".html": `text/html; charset=utf-8`,
+        ".css": "text/css; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+        ".wasm": "application/wasm",
+        ...opt?.MimeTypes,
+      }).some(([ext, header]) => {
+        if (filePath.endsWith(ext)) {
+          res.setHeader("Content-type", header);
+          return true;
+        }
+        return false;
+      })
     ) {
       res.setHeader("Content-Disposition", "attachment; filename=" + encodeURI(base));
+    }
+    res.setHeader("Accept-Ranges", "bytes");
+
+    const range =
+      String(req.headers.range || "")
+        .toLowerCase()
+        .match(/^bytes=(\d+)-(\d*)$/) || [];
+    let start = 0,
+      end = size - 1;
+    if (range[1]) {
+      start = Number(range[1]);
+      end = range[2] === "" ? end : Math.min(end, Number(range[2]));
+
+      if (start >= size || start > end) {
+        res.statusCode = 416; // Range Not Satisfiable
+        res.setHeader("Content-Range", `bytes */${size}`);
+        res.end();
+        return res.statusCode;
+      }
+      res.statusCode = 206;
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+    }
+    res.setHeader("Content-Length", end - start + 1);
+    if (req.method !== "HEAD") {
+      fs.createReadStream(filePath, { start, end }).pipe(res);
+    } else {
+      res.end();
     }
 
     return res.statusCode;
   } catch (e) {
+    if (e instanceof RangeError) {
+      res.statusCode = 416;
+      res.end();
+      return res.statusCode;
+    }
+    // console.log(
+    //   `${new Date().toLocaleString()} ${req.socket.remoteAddress} ${req.method} ${req.url} -> ${filePath} ${e}`,
+    // );
     res.statusCode = 404;
   }
 
