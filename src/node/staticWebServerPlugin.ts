@@ -24,14 +24,21 @@ async function staticWebServerPlugin(
   },
 ) {
   const url = new URL("http://" + (req.headers?.host || "127.0.0.1") + req.url);
-
+  const root = opt?.root ?? __dirname;
   const filePath = path.resolve(
-    opt?.root ?? __dirname,
+    root,
     decodeURIComponent(
       url.pathname.substring(1) +
         (url.pathname.endsWith("/") ? (opt?.autoIndex ? "" : (opt?.index ?? "index.html")) : ""),
     ),
   );
+
+  if (!filePath.startsWith(root + path.sep)) {
+    res.statusCode = 403;
+    res.end(String(res.statusCode));
+    return res.statusCode;
+  }
+
   try {
     const stat = await fs.promises.stat(filePath);
     const { size, mtimeMs } = stat;
@@ -74,7 +81,7 @@ async function staticWebServerPlugin(
     if (opt?.onFileAccess) opt.onFileAccess(filePath, stat);
 
     /** 协商缓存 */
-    if (opt?.cache !== "none") {
+    if (!req.headers?.range && opt?.cache !== "none") {
       const cacheLastModified = req.headers["if-modified-since"];
       const cacheEtag = req.headers["if-none-match"];
       const fileLastModified = new Date(mtimeMs).toUTCString();
@@ -84,14 +91,14 @@ async function staticWebServerPlugin(
       if (cacheLastModified === fileLastModified && cacheEtag) {
         if (
           cacheEtag ===
-          fileEtag + (cacheEtag.includes(",") || fileHash ? `,${fileHash || (await getFileHash(filePath))}` : "")
+          fileEtag + (cacheEtag.includes("-") || fileHash ? `-${fileHash || (await getFileHash(filePath))}` : "")
         ) {
           res.statusCode = 304;
           res.end();
           return res.statusCode;
         }
       }
-      res.setHeader("ETag", fileEtag + (fileHash ? `,${fileHash}` : ""));
+      res.setHeader("ETag", fileEtag + (fileHash ? `-${fileHash}` : ""));
       res.setHeader("Last-Modified", fileLastModified);
     }
 
@@ -126,7 +133,7 @@ async function staticWebServerPlugin(
       start = Number(range[1]);
       end = range[2] === "" ? end : Math.min(end, Number(range[2]));
 
-      if (start >= size || start > end) {
+      if (!isFinite(start) || !isFinite(end) || start >= size || start > end) {
         res.statusCode = 416; // Range Not Satisfiable
         res.setHeader("Content-Range", `bytes */${size}`);
         res.end();
