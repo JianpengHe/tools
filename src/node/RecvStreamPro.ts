@@ -33,37 +33,43 @@ export class RecvStreamPro extends stream.Writable {
   private async cleanTask() {
     if (this._writeLock) return;
     this._writeLock = true;
-    while (this.task || (this.task = this.taskQueue.shift())) {
-      /** 已读的未能满足需求 */
-      if (this.lastBuffer.length < this.task.needReadSize) {
-        if (this.isFinal) {
-          /** 流结束了，但还有未完成的任务 */
-          // console.log("流结束了，但还有未完成的任务", this.task, this.taskQueue, this.lastBuffer);
-          this.task.onData(this.task);
-          this.lastBuffer = Buffer.allocUnsafe(0);
+
+    try {
+      while (this.task || (this.task = this.taskQueue.shift())) {
+        /** 已读的未能满足需求 */
+        if (this.lastBuffer.length < this.task.needReadSize) {
+          if (this.isFinal) {
+            /** 流结束了，但还有未完成的任务 */
+            // 修复1：增加 await，确保异步任务执行完再继续
+            const res = this.task.onData(this.task);
+            if (res instanceof Promise) await res;
+
+            this.lastBuffer = Buffer.allocUnsafe(0);
+            this.task.onEnd?.();
+            this.task = undefined;
+            continue;
+          }
+          // 这里的 break 很重要，确保跳出循环去处理 callback
+          break;
+        }
+
+        const res = this.task.onData(this.task);
+        if (res instanceof Promise) await res; // 修复2：统一判断 Promise
+
+        if (this.task && this.task.needReadSize <= 0) {
           this.task.onEnd?.();
           this.task = undefined;
-          continue;
         }
-        this._writeLock = false;
-        const { callback } = this;
-        this.callback = undefined;
-        callback?.(null);
-        return;
       }
-      // const buf = this.lastBuffer.subarray(0, curNeedRead);
-      // this.lastBuffer = this.lastBuffer.subarray(curNeedRead);
-      // this.task.needReadSize -= buf.length;
-      const res = this.task.onData(this.task);
-      if (res) await res;
-
-      //console.log(this.task.needReadSize);
-      if (this.task.needReadSize <= 0) {
-        this.task.onEnd?.();
-        this.task = undefined;
+    } finally {
+      this._writeLock = false;
+      // 修复3：核心修复 - 无论循环如何结束，只要有 callback 且缓冲区需要补充或任务已空，就通知上游
+      if (this.callback) {
+        const cb = this.callback;
+        this.callback = undefined;
+        cb(null);
       }
     }
-    this._writeLock = false;
   }
   /** 接收到新数据时 */
   protected onData?: (chunk: Buffer) => Buffer;
@@ -76,10 +82,10 @@ export class RecvStreamPro extends stream.Writable {
   }
   public isFinal = false;
   public _final(callback: (error?: Error | null | undefined) => void): void {
-    // console.log("_final");
     this.isFinal = true;
-    this.cleanTask();
-    callback(null);
+    this.cleanTask()
+      .then(() => callback(null))
+      .catch(callback);
   }
 
   public readableError: Error | null = null;
