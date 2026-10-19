@@ -126,6 +126,7 @@ export class ShowTransferProgress {
   }
   public isEnd = false;
   public end() {
+    if (this.isEnd) return;
     this.isEnd = true;
     this.timer && clearInterval(this.timer);
     this.updateTransferProgressDisplay();
