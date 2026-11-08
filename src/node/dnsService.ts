@@ -177,8 +177,9 @@ export const getDnsServer = () => dns.getServers().find(ip => net.isIPv4(ip)) ||
 export class DnsServer {
   /** 上游DNS服务器IP地址 */
   public dnsServerIp = getDnsServer();
-  /** UDP服务器实例，用于接收和发送DNS报文 */
+  /** UDP服务器实例，用于接收和发送DNS报文 (IPv4 & IPv6 双栈) */
   public udpServer = dgram.createSocket("udp4");
+  public udpServerV6 = dgram.createSocket("udp6");
   /**
    * DNS查询回调函数
    * 当本地应用程序请求dns解析时，返回哪个ip
@@ -196,7 +197,7 @@ export class DnsServer {
    * @param msg 接收到的DNS请求报文
    * @param rinfo 远程地址信息
    */
-  private async onMessage(msg: Buffer, rinfo: dgram.RemoteInfo) {
+  private async onMessage(msg: Buffer, rinfo: dgram.RemoteInfo, socket: dgram.Socket = this.udpServer) {
     /** 先从上游DNS服务器获取真实的IP */
     const realIps = await dnsResolveRaw(msg, this.dnsServerIp);
     /** 构建answer的域名->IP映射表，方便查找 */
@@ -237,13 +238,16 @@ export class DnsServer {
         continue;
       }
 
+      const isV6 = query.QTYPE === EDnsResolveType.AAAA;
+      const finalRdata = isV6 ? (net.isIPv6(realIp) ? realIp : "::1") : net.isIPv4(realIp) ? realIp : "127.0.0.1";
+
       if (answer) {
         // 如果找到了答案但需要修改IP
-        if (answer.RDATA !== realIp) {
+        if (answer.RDATA !== finalRdata) {
           realIps.answers.forEach(ans => {
             if (ans.NAME === answer.NAME) {
-              ans.TYPE = EDnsResolveType.A;
-              ans.RDATA = realIp;
+              ans.TYPE = isV6 ? EDnsResolveType.AAAA : EDnsResolveType.A;
+              ans.RDATA = finalRdata;
             }
           });
         }
@@ -251,11 +255,11 @@ export class DnsServer {
         /** 远端DNS解析失败的域名，直接自定义IP */
         realIps.answers.push({
           NAME: query.QNAME,
-          TYPE: EDnsResolveType.A,
+          TYPE: isV6 ? EDnsResolveType.AAAA : EDnsResolveType.A,
           CLASS: 1,
           TTL: 600,
-          RDLENGTH: 4,
-          RDATA: realIp,
+          RDLENGTH: isV6 ? 16 : 4,
+          RDATA: finalRdata,
         });
       }
 
@@ -286,6 +290,23 @@ export class DnsServer {
         case EDnsResolveType.A:
           // A记录：将点分十进制IP转换为4字节二进制
           return Buffer.from(RDATA.split(".").map(a => Number(a)));
+        case EDnsResolveType.AAAA: {
+          // AAAA记录：将IPv6字符串转换为16字节二进制
+          const buf16 = Buffer.alloc(16);
+          const dIdx = RDATA.indexOf("::");
+          let parts: string[];
+          if (dIdx !== -1) {
+            const left = RDATA.slice(0, dIdx).split(":").filter(Boolean);
+            const right = RDATA.slice(dIdx + 2).split(":").filter(Boolean);
+            parts = [...left, ...Array(8 - (left.length + right.length)).fill("0"), ...right];
+          } else {
+            parts = RDATA.split(":");
+          }
+          for (let i = 0; i < 8; i++) {
+            buf16.writeUInt16BE(parseInt(parts[i] || "0", 16), i * 2);
+          }
+          return buf16;
+        }
         case EDnsResolveType.CNAME:
           // CNAME记录：将域名转换为DNS格式
           dnsResolveStringifyWriteHostName(RDATA, buf);
@@ -302,7 +323,7 @@ export class DnsServer {
     };
 
     // 发送DNS响应
-    this.udpServer.send(
+    socket.send(
       dnsResolveStringify({
         ...realIps,
         answers: realIps.answers.map(({ NAME, TYPE, CLASS, TTL, RDATA }) => ({
@@ -318,7 +339,7 @@ export class DnsServer {
       err => {
         if (err) {
           console.log("DNS Server\t", err);
-          this.udpServer.close();
+          socket.close();
         }
       },
     );
@@ -383,10 +404,24 @@ export class DnsServer {
     this.hostsMap = new Map();
     this.udpServerHost = host;
 
-    // 启动DNS服务器
+    // 启动DNS服务器 (IPv4 & IPv6 双栈)
     this.killBindPort(port, autoSettings).then(() => {
       this.udpServer.bind(port, host);
-      this.udpServer.on("message", this.onMessage.bind(this));
+      this.udpServer.on("message", (msg, rinfo) => this.onMessage(msg, rinfo, this.udpServer));
+
+      // IPv6 默认监听 ::1
+      try {
+        this.udpServerV6.bind(port, "::1");
+        this.udpServerV6.on("message", (msg, rinfo) => this.onMessage(msg, rinfo, this.udpServerV6));
+        this.udpServerV6.on("listening", () => {
+          console.log("DNS Server (IPv6)\t", "启动成功", `[::1]:${port}`);
+        });
+        this.udpServerV6.on("error", err => {
+          console.warn("DNS Server (IPv6)\t", "绑定警告", err.message);
+        });
+      } catch (e: any) {
+        console.warn("DNS Server (IPv6)\t", "启动异常", e.message);
+      }
     });
   }
 
@@ -409,6 +444,14 @@ export class DnsServer {
    */
   public getRawIp(host: string, dnsServerIp?: string) {
     return dnsResolve(host, dnsServerIp || this.dnsServerIp);
+  }
+
+  /**
+   * 创建一个可以直接传给 http.request({ lookup }) 的外部 DNS 解析器
+   * 自动使用本 DNS 服务器记录的上游真实 DNS，并附带 TTL 缓存
+   */
+  public createLookup(options?: IExternalLookupOptions) {
+    return createExternalLookup({ dnsServerIp: this.dnsServerIp, ...options });
   }
 }
 
@@ -461,6 +504,14 @@ export const dnsResolveParse = (msg: Buffer): Required<IDnsResolve> => {
       case EDnsResolveType.A:
         // A记录：将4字节IP转换为点分十进制
         return [...buffer].join(".");
+      case EDnsResolveType.AAAA: {
+        // AAAA记录：将16字节转换为IPv6地址
+        const groups: string[] = [];
+        for (let i = 0; i < buffer.length && i < 16; i += 2) {
+          groups.push(buffer.readUInt16BE(i).toString(16));
+        }
+        return groups.join(":");
+      }
       case EDnsResolveType.CNAME:
         // CNAME记录：解析为域名
         buf.offset -= buffer.length;
@@ -581,7 +632,7 @@ export const dnsResolveRaw = (
 ): Promise<Required<IDnsResolve>> =>
   new Promise((resolve, reject) => {
     // 创建UDP客户端
-    const client = dgram.createSocket("udp4");
+    const client = dgram.createSocket(net.isIPv6(dnsServerIp) ? "udp6" : "udp4");
 
     // 处理错误
     client.on("error", err => {
@@ -621,17 +672,151 @@ export const dnsResolve = async (
   host: string,
   dnsServerIp: string = "",
   dnsServerPort: number = 53,
+  type: EDnsResolveType = EDnsResolveType.A,
 ): Promise<string> => {
   // 发送DNS查询
-  const { answers } = await dnsResolveRaw({ queries: [{ QNAME: host }] }, dnsServerIp || getDnsServer(), dnsServerPort);
+  const { answers } = await dnsResolveRaw(
+    { queries: [{ QNAME: host, QTYPE: type }] },
+    dnsServerIp || getDnsServer(),
+    dnsServerPort,
+  );
 
-  // 查找A记录
-  const RDATA = answers.find(({ TYPE, CLASS }) => CLASS === 1 && TYPE === EDnsResolveType.A)?.RDATA;
+  // 查找对应类型记录
+  const RDATA = answers.find(({ TYPE, CLASS }) => CLASS === 1 && TYPE === type)?.RDATA;
   if (!RDATA) {
     throw new Error("没找到" + host + "的IP地址");
   }
   return RDATA;
 };
+
+/**
+ * 外部 DNS 解析器配置选项
+ */
+export interface IExternalLookupOptions {
+  /** 外部上游 DNS 服务器地址，默认使用系统配置的上游 DNS */
+  dnsServerIp?: string;
+  /** 上游 DNS 端口，默认 53 */
+  dnsServerPort?: number;
+  /** 最小缓存时间（秒），默认 5 秒 */
+  minTtl?: number;
+  /** 最大缓存时间（秒），默认 600 秒（10分钟） */
+  maxTtl?: number;
+}
+
+/**
+ * 创建一个符合 Node.js 标准 lookup 签名的外部 DNS 解析函数
+ * 适用于 http.request({ lookup }) 或 net.connect({ lookup })，自带 TTL 内存缓存与 IPv6 支持
+ */
+export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
+  const dnsServerIp = opt.dnsServerIp || getDnsServer();
+  const dnsServerPort = opt.dnsServerPort || 53;
+  const minTtl = opt.minTtl ?? 5;
+  const maxTtl = opt.maxTtl ?? 600;
+
+  // 内存缓存: key 为 "hostname:family"，value 为解析结果与过期时间
+  const cache = new Map<string, { address: string; family: 4 | 6; expires: number }>();
+  // 并发请求防击穿 Map
+  const pendingMap = new Map<string, Promise<{ address: string; family: 4 | 6 }>>();
+
+  const resolveHost = async (hostname: string, family: number): Promise<{ address: string; family: 4 | 6 }> => {
+    const queryTypes: EDnsResolveType[] =
+      family === 6
+        ? [EDnsResolveType.AAAA]
+        : family === 4
+        ? [EDnsResolveType.A]
+        : [EDnsResolveType.A, EDnsResolveType.AAAA];
+
+    for (const qtype of queryTypes) {
+      try {
+        const { answers } = await dnsResolveRaw(
+          { queries: [{ QNAME: hostname, QTYPE: qtype }] },
+          dnsServerIp,
+          dnsServerPort,
+        );
+        const answer = answers.find(({ TYPE, CLASS }) => CLASS === 1 && TYPE === qtype);
+        if (answer?.RDATA) {
+          const isV6 = answer.TYPE === EDnsResolveType.AAAA;
+          const resolvedFamily: 4 | 6 = isV6 ? 6 : 4;
+          const ttl = Math.min(Math.max(answer.TTL || 60, minTtl), maxTtl);
+          const entry = { address: answer.RDATA, family: resolvedFamily, expires: Date.now() + ttl * 1000 };
+          cache.set(`${hostname}:${family}`, entry);
+          return entry;
+        }
+      } catch {
+        // 尝试下一个记录类型
+      }
+    }
+
+    const err: NodeJS.ErrnoException = new Error(`getaddrinfo ENOTFOUND ${hostname}`);
+    err.code = "ENOTFOUND";
+    throw err;
+  };
+
+  const lookup = (
+    hostname: string,
+    options: any,
+    callback?: (err: NodeJS.ErrnoException | null, address?: any, family?: number) => void,
+  ) => {
+    let cb: (err: NodeJS.ErrnoException | null, address?: any, family?: number) => void;
+    let family = 0;
+    let all = false;
+
+    if (typeof options === "function") {
+      cb = options;
+    } else if (typeof options === "number") {
+      family = options;
+      cb = callback!;
+    } else {
+      family = options?.family || 0;
+      all = Boolean(options?.all);
+      cb = callback!;
+    }
+
+    if (!hostname) {
+      return cb(null, all ? [] : "", 4);
+    }
+
+    // 如果本身已经是 IP 地址，直接返回
+    const isIp = net.isIP(hostname);
+    if (isIp) {
+      return cb(null, all ? [{ address: hostname, family: isIp }] : hostname, isIp);
+    }
+
+    // 处理 localhost 特例
+    if (hostname === "localhost") {
+      const addr = family === 6 ? "::1" : "127.0.0.1";
+      const fam = family === 6 ? 6 : 4;
+      return cb(null, all ? [{ address: addr, family: fam }] : addr, fam);
+    }
+
+    const cacheKey = `${hostname}:${family}`;
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() < cached.expires) {
+      return cb(null, all ? [{ address: cached.address, family: cached.family }] : cached.address, cached.family);
+    }
+
+    let promise = pendingMap.get(cacheKey);
+    if (!promise) {
+      promise = resolveHost(hostname, family);
+      pendingMap.set(cacheKey, promise);
+      promise.finally(() => pendingMap.delete(cacheKey));
+    }
+
+    promise.then(
+      res => {
+        cb(null, all ? [{ address: res.address, family: res.family }] : res.address, res.family);
+      },
+      err => cb(err),
+    );
+  };
+
+  return lookup;
+};
+
+/**
+ * 默认导出的标准外部 DNS lookup 函数，直接可用于 http.request({ lookup: externalLookup })
+ */
+export const externalLookup = createExternalLookup();
 
 // 测试用例
 // dnsResolveRaw(

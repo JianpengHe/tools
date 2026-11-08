@@ -532,7 +532,7 @@ export class OperatingSystemHttpProxy {
  * @param autoReset 是否在程序退出时自动恢复原始DNS设置，默认为true
  * @returns 返回一个Promise，解析为设置了DNS的网络接口名称数组
  */
-export const setDnsAddr = async (addr: string, autoReset = true) => {
+export const setDnsAddr = async (addr: string, autoReset = true, addrV6 = "::1") => {
   switch (os.platform()) {
     case "win32":
       // 获取所有非内部的IPv4网络接口
@@ -549,19 +549,24 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
       if (autoReset) {
         afterExit(() => {
           child_process.execSync(
-            names.map(name => `netsh interface ipv4 set dns name="${name}" source = dhcp`).join(" & ") +
+            names
+              .map(
+                name =>
+                  `netsh interface ipv4 set dns name="${name}" source = dhcp & netsh interface ipv6 set dns name="${name}" source = dhcp`,
+              )
+              .join(" & ") +
               "& ipconfig/flushdns & netsh winsock reset",
           );
         });
       }
 
-      // 为每个网络接口设置DNS服务器
+      // 为每个网络接口设置DNS服务器 (同时设置 IPv4 与 IPv6，避免双栈网络下发生 DNS 泄漏)
       await Promise.all(
         names.map(
           name =>
             new Promise((resolve, reject) =>
               child_process.exec(
-                `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY && ipconfig/flushdns`,
+                `netsh interface ipv4 set dns name="${name}" source=static addr=${addr} register=PRIMARY & netsh interface ipv6 set dns name="${name}" source=static addr=${addrV6} register=PRIMARY & ipconfig/flushdns`,
                 (err, out) => {
                   if (err) {
                     child_process.execFileSync("cmd", [`/C chcp 65001>nul`]);
@@ -586,7 +591,7 @@ export const setDnsAddr = async (addr: string, autoReset = true) => {
       await Promise.all(
         networkServices.map(async networkService => {
           try {
-            await childProcessExec(`networksetup -setdnsservers "${networkService}" ${addr}`);
+            await childProcessExec(`networksetup -setdnsservers "${networkService}" ${addr} ${addrV6}`);
           } catch (e) {
             console.log("自动配置DNS\t\x1B[31m失败\x1B[0m\t", networkService, String(e));
           }
