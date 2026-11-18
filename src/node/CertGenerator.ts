@@ -22,6 +22,7 @@ import * as net from "net";
 import * as url from "url";
 import * as os from "os";
 import * as tls from "tls";
+import * as http from "http";
 
 /**
  * ============================================================================
@@ -310,6 +311,12 @@ export class CertGenerator {
     EKU: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x25]),
     /** 增强密钥用法目的: Server Authentication / 服务器身份验证 (1.3.6.1.5.5.7.3.1 / id-kp-serverAuth) */
     SERVER_AUTH: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01]),
+    /** 标准扩展: Authority Information Access / 颁发机构信息访问 (1.3.6.1.5.5.7.1.1 / id-pe-authorityInfoAccess) */
+    AIA: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01]),
+    /** AIA 访问方法: OCSP (1.3.6.1.5.5.7.48.1 / id-ad-ocsp) */
+    AD_OCSP: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01]),
+    /** 标准扩展: CRL Distribution Points / CRL 分发点 (2.5.29.31 / id-ce-cRLDistributionPoints) */
+    CDP: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x1f]),
   };
 
   /**
@@ -321,9 +328,10 @@ export class CertGenerator {
    * 3. 基本约束 (Basic Constraints): CA:TRUE (Critical)
    * 4. 密钥用法 (Key Usage): digitalSignature, keyCertSign (签发证书), cRLSign (签发吊销列表) (Critical)
    * 5. 颁发者与主题: 自签名，Issuer 与 Subject 均为指定的 commonName
+   * 6. 有效期: notBefore 为当前时间倒退 10 分钟 (防时钟漂移)，notAfter 必须大于 notBefore
    *
    * @param commonName CA 根证书的主体名称 (Common Name)，例如 "My Root CA"
-   * @param years 证书有效期（单位：年），默认为 10 年
+   * @param expiryTime 证书到期毫秒时间戳，不传则默认为当前时间起 20 年
    * @returns 返回生成的 CA 密钥及证书对象：
    *   - `caKeyObj`: 内存中的 KeyObject 私钥对象，用于后续直接为服务端证书签名
    *   - `caNameDer`: CA 主体名称的 ASN.1 DER 编码 Buffer，签发服务端证书时作为 Issuer
@@ -331,7 +339,7 @@ export class CertGenerator {
    *   - `caCertPem`: X.509 格式的根证书 PEM 字符串
    *   - `expiry`: 证书过期时间戳（毫秒）
    */
-  public static async createRootCA(commonName: string, years: number = 10) {
+  public static async createRootCA(commonName: string, expiryTime?: number) {
     // 1. 生成 CA 密钥对
     const { privateKey, publicKey } = await generateRsaKey();
     const pubKeyDer = publicKey.export({ type: "spki", format: "der" });
@@ -344,10 +352,17 @@ export class CertGenerator {
       ASN1Encoder.set(ASN1Encoder.sequence(this.OID.COMMON_NAME, ASN1Encoder.utf8String(commonName))),
     );
 
-    const now = new Date();
-    const expiry = new Date();
-    expiry.setUTCFullYear(now.getUTCFullYear() + years);
-    const validity = ASN1Encoder.sequence(ASN1Encoder.utcTime(now), ASN1Encoder.utcTime(expiry));
+    // 生效时间：向前偏移 10 分钟防止客户端时钟漂移
+    const notBefore = new Date(Date.now() - 10 * 60 * 1000);
+    // 到期时间：默认 20 年
+    const notAfter =
+      expiryTime !== undefined ? new Date(expiryTime) : new Date(notBefore.getTime() + 20 * 365 * 86400_000);
+    if (notAfter.getTime() <= notBefore.getTime()) {
+      throw new Error(
+        `Invalid certificate validity: notAfter (${notAfter.toISOString()}) must be later than notBefore (${notBefore.toISOString()})`,
+      );
+    }
+    const validity = ASN1Encoder.sequence(ASN1Encoder.utcTime(notBefore), ASN1Encoder.utcTime(notAfter));
 
     // Basic Constraints: CA:TRUE (Critical)
     const isCritical = Buffer.from([0x01, 0x01, 0xff]);
@@ -375,7 +390,7 @@ export class CertGenerator {
       caNameDer: name, // 保留 CA 主体名称的 DER，给 Server Issuer 用
       caKeyPem: ASN1Encoder.toPem("PRIVATE KEY", privateKey.export({ type: "pkcs8", format: "der" })),
       caCertPem: ASN1Encoder.toPem("CERTIFICATE", certDer),
-      expiry: expiry.getTime(),
+      expiry: notAfter.getTime(),
     };
   }
 
@@ -395,7 +410,8 @@ export class CertGenerator {
    * @param domain 域名或 IP，支持单个字符串（支持逗号/空格分隔多个）或字符串数组
    * @param caKey CA 私钥，可为 KeyObject 对象、PEM 格式文本或 DER Buffer
    * @param caCertOrNameDer CA 根证书 PEM 文本或 CA Subject 的 DER Buffer
-   * @param years 服务器证书有效期（单位：年），默认为 1 年
+   * @param expiryTime 服务器证书到期毫秒时间戳，不传则默认为当前时间起 1 年
+   * @param crlUrl CRL 分发点 URL（如 "http://127.0.0.1:8919/ca.crl"），为空则不添加 CDP 扩展
    * @returns 返回包含服务器私钥及完整证书链的对象：
    *   - `key`: PKCS#8 格式的服务器私钥 PEM 字符串
    *   - `cert`: 完整的证书链 PEM 字符串 (服务器证书 + CA 证书)
@@ -405,7 +421,8 @@ export class CertGenerator {
     domain: string | string[],
     caKey: crypto.KeyObject | string | Buffer,
     caCertOrNameDer: Buffer | string,
-    years: number = 1,
+    expiryTime?: number,
+    crlUrl?: string,
   ) {
     const caKeyObj = caKey instanceof crypto.KeyObject ? caKey : crypto.createPrivateKey(caKey);
     const caNameDer =
@@ -448,10 +465,16 @@ export class CertGenerator {
       ASN1Encoder.set(ASN1Encoder.sequence(this.OID.COMMON_NAME, ASN1Encoder.utf8String(commonName))),
     );
 
-    const now = new Date();
-    const expiry = new Date();
-    expiry.setUTCFullYear(now.getUTCFullYear() + years);
-    const validity = ASN1Encoder.sequence(ASN1Encoder.utcTime(now), ASN1Encoder.utcTime(expiry));
+    // 生效时间：向前偏移 10 分钟防止客户端时钟漂移
+    const notBefore = new Date(Date.now() - 10 * 60 * 1000);
+    // 到期时间：默认 1 年
+    const notAfter = expiryTime !== undefined ? new Date(expiryTime) : new Date(notBefore.getTime() + 365 * 86400_000);
+    if (notAfter.getTime() <= notBefore.getTime()) {
+      throw new Error(
+        `Invalid certificate validity: notAfter (${notAfter.toISOString()}) must be later than notBefore (${notBefore.toISOString()})`,
+      );
+    }
+    const validity = ASN1Encoder.sequence(ASN1Encoder.utcTime(notBefore), ASN1Encoder.utcTime(notAfter));
 
     // 扩展项配置
     // - Basic Constraints: CA:FALSE
@@ -473,7 +496,24 @@ export class CertGenerator {
       ASN1Encoder.octetString(ASN1Encoder.sequence(this.OID.SERVER_AUTH)),
     );
 
-    const extensions = ASN1Encoder.sequence(bcExt, serverKuExt, sanExt, ekuExt);
+    // - CDP: CRL Distribution Points（若提供了 crlUrl，写入 CRL 分发点地址供客户端查询吊销状态）
+    const extList = [bcExt, serverKuExt, sanExt, ekuExt];
+    if (crlUrl) {
+      const crlUrlBuf = Buffer.from(crlUrl, "ascii");
+      // uniformResourceIdentifier [6] IMPLICIT (0x86)
+      const uri = Buffer.concat([Buffer.from([0x86]), ASN1Encoder.encodeLength(crlUrlBuf.length), crlUrlBuf]);
+      // DistributionPointName.fullName [0] CONSTRUCTED (0xa0)
+      const fullName = Buffer.concat([Buffer.from([0xa0]), ASN1Encoder.encodeLength(uri.length), uri]);
+      // DistributionPoint.distributionPoint [0] CONSTRUCTED (0xa0)
+      const dp = Buffer.concat([Buffer.from([0xa0]), ASN1Encoder.encodeLength(fullName.length), fullName]);
+      const cdpExt = ASN1Encoder.sequence(
+        this.OID.CDP,
+        ASN1Encoder.octetString(ASN1Encoder.sequence(ASN1Encoder.sequence(dp))),
+      );
+      extList.push(cdpExt);
+    }
+
+    const extensions = ASN1Encoder.sequence(...extList);
     const extContext = Buffer.concat([Buffer.from([0xa3]), ASN1Encoder.encodeLength(extensions.length), extensions]);
 
     // 组装 TBS
@@ -487,7 +527,7 @@ export class CertGenerator {
     return {
       key: ASN1Encoder.toPem("PRIVATE KEY", privateKey.export({ type: "pkcs8", format: "der" })),
       cert: ASN1Encoder.toPem("CERTIFICATE", certDer) + String(caCertOrNameDer),
-      expiry: expiry.getTime(),
+      expiry: notAfter.getTime(),
     };
   }
 
@@ -537,6 +577,44 @@ export class CertGenerator {
       console.log("【失败】取消了 UAC 授权，或证书发生错误。", certPath, e.code);
     }
     return false;
+  }
+
+  /**
+   * 生成空的 CRL (Certificate Revocation List) 证书吊销列表
+   *
+   * 构造规范 (符合 RFC 5280 Section 5)：
+   * 1. 版本: v2 (INTEGER 1)
+   * 2. 签名算法: SHA-256 with RSA
+   * 3. 颁发者: 与 CA 证书的 Subject 完全一致
+   * 4. thisUpdate: 当前时间倒退 10 分钟 (防时钟漂移)
+   * 5. nextUpdate: 吊销列表下一次更新的到期时间戳，必须大于 thisUpdate
+   * 6. revokedCertificates: 省略（表示没有被吊销的证书）
+   *
+   * @param caKey CA 私钥 KeyObject，用于签名 CRL
+   * @param caNameDer CA Subject Name 的 ASN.1 DER 编码 Buffer
+   * @param expiryTime CRL 下次更新毫秒时间戳（通常对齐 CA 根证书的 expiry）
+   * @returns DER 编码的 CRL Buffer，可通过 ASN1Encoder.toPem("X509 CRL", ...) 转为 PEM
+   */
+  public static createCRL(caKey: crypto.KeyObject, caNameDer: Buffer, expiryTime: number): Buffer {
+    const sigAlg = ASN1Encoder.sequence(this.OID.SHA256_RSA, Buffer.from([0x05, 0x00]));
+    const thisUpdate = new Date(Date.now() - 10 * 60 * 1000);
+    const nextUpdate = new Date(expiryTime);
+    if (nextUpdate.getTime() <= thisUpdate.getTime()) {
+      throw new Error(
+        `Invalid CRL validity: nextUpdate (${nextUpdate.toISOString()}) must be later than thisUpdate (${thisUpdate.toISOString()})`,
+      );
+    }
+    // TBSCertList: version(v2=1), sigAlg, issuer, thisUpdate, nextUpdate
+    // 无 revokedCertificates 字段（空列表 = 未吊销任何证书）
+    const tbsCertList = ASN1Encoder.sequence(
+      ASN1Encoder.integer(Buffer.from([0x01])),
+      sigAlg,
+      caNameDer,
+      ASN1Encoder.utcTime(thisUpdate),
+      ASN1Encoder.utcTime(nextUpdate),
+    );
+    const signature = crypto.sign("sha256", tbsCertList, caKey);
+    return ASN1Encoder.sequence(tbsCertList, sigAlg, ASN1Encoder.bitString(signature));
   }
 }
 
@@ -595,23 +673,35 @@ async function getCert(keyPath: string, certPath: string) {
  * 3. 内存 SecureContext 缓存：在内存中维护 SecureContext 映射，大幅提升 TLS 握手性能；
  * 4. LRU / FIFO 淘汰：缓存数量达到 maxHostCount 时自动淘汰最早建立的安全上下文；
  * 5. 防缓存击穿 (Pending Promise Map)：针对同一域名的并发请求进行合并，避免高并发下并发签发；
- * 6. CA 自动就绪：首次调用自动生成 10 年期根 CA 并尝试通过 trustCaInWindows 注册到系统受信任区。
+ * 6. CA 自动就绪：首次调用自动生成 10 年期根 CA 并尝试通过 trustCaInWindows 注册到系统受信任区；
+ * 7. CRL 吊销列表：当配置 crlUrl 时，自动生成空 CRL 文件并提供 handleCRL 方法响应 HTTP 请求。
  *
- * @param rootCaName 根 CA 名称，默认 "PG CA test"
- * @param maxHostCount 内存中最大缓存的 SecureContext 数量，默认 100
- * @param certDiskPath 证书本地磁盘持久化目录，默认为当前用户目录下的 AppData/Local/${rootCaName}
+ * @param opt 配置选项
+ * @param opt.rootCaName 根 CA 名称，默认 "PG CA test"
+ * @param opt.maxHostCount 内存中最大缓存的 SecureContext 数量，默认 100
+ * @param opt.certDiskPath 证书本地磁盘持久化目录，默认为当前用户目录下的 AppData/Local/${rootCaName}
+ * @param opt.crlUrl CRL 分发点 HTTP URL（如 "http://127.0.0.1:8919/ca.crl"），为空则不启用 CRL 功能
  * @returns 返回包含以下属性的对象：
  *   - `SNICallback`: 可直接用于 tls.createServer 或 https.createServer 的 SNICallback 函数
  *   - `installCA`: 确保根 CA 证书生成并安装到系统的初始化方法
  *   - `secureContextMap`: 内存中的 SecureContext 缓存映射
+ *   - `handleCRL`: 处理 CRL HTTP 请求的异步方法（仅当配置了 crlUrl 时有效）
  */
 export function createSNICallback(
-  rootCaName = "PG CA test",
-  maxHostCount = 100,
-  certDiskPath = path.resolve(os.homedir(), "AppData", "Local", rootCaName),
-  // log = console.log,
+  opt: {
+    rootCaName?: string;
+    maxHostCount?: number;
+    certDiskPath?: string;
+    crlUrl?: string;
+  } = {},
 ) {
-  let caPem: Awaited<ReturnType<typeof getCert>> = null;
+  const {
+    rootCaName = "PG CA test",
+    maxHostCount = 100,
+    certDiskPath = path.resolve(os.homedir(), "AppData", "Local", opt.rootCaName || "PG CA test"),
+    crlUrl,
+  } = opt;
+  let caPem: (NonNullable<Awaited<ReturnType<typeof getCert>>> & { crlDer?: Buffer }) | null = null;
   let installCAPromise: Promise<void> | undefined;
   const secureContextMap = new Map<string, { ctx: tls.SecureContext; expiry: number }>();
   const secureContexPendingPromiseMap = new Map<string, Promise<void>>();
@@ -631,7 +721,7 @@ export function createSNICallback(
           await (installCAPromise || installCA());
           if (!caPem) throw new Error("CA key or cert is empty");
         }
-        pem = await CertGenerator.createServerCert(servername, caPem.key, caPem.cert, 1);
+        pem = await CertGenerator.createServerCert(servername, caPem.key, caPem.cert, undefined, crlUrl);
         if (caPem.expiry > 0)
           await Promise.all([fs.promises.writeFile(certPath, pem.cert), fs.promises.writeFile(keyPath, pem.key)]);
       }
@@ -697,7 +787,7 @@ export function createSNICallback(
         const caCertPath = path.resolve(certDiskPath, "ca.crt");
         caPem = await getCert(caKeyPath, caCertPath);
         if (caPem) return;
-        let { caKeyPem, caCertPem, expiry } = await CertGenerator.createRootCA(rootCaName, 10);
+        let { caKeyPem, caCertPem, expiry } = await CertGenerator.createRootCA(rootCaName);
         if (!caKeyPem || !caCertPem) throw new Error("自动生成CA证书失败");
         await fs.promises.mkdir(certDiskPath, { recursive: true });
         await Promise.all([
@@ -722,39 +812,74 @@ export function createSNICallback(
       }
     })());
 
+  /**
+   * 处理 CRL HTTP 请求
+   * 将缓存的 CRL DER 字节以 application/pkix-crl 格式写入 HTTP 响应
+   *
+   * @param req HTTP 请求对象（IncomingMessage）
+   * @param res HTTP 响应对象（ServerResponse）
+   * @returns true 表示成功响应了 CRL，false 表示 CRL 未就绪或未启用
+   */
+  const handleCRL = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> => {
+    if (!crlUrl) return false;
+    await (installCAPromise || installCA());
+    if (!caPem || caPem.expiry <= Date.now()) return false;
+    // 惰性计算：需要时算一次并缓存到 caPem 对象中，有效期与 CA 根证书完全一致
+    if (!caPem.crlDer) {
+      const caKeyObj = crypto.createPrivateKey(caPem.key);
+      const caNameDer = ASN1Encoder.extractSubject(caPem.cert);
+      caPem.crlDer = CertGenerator.createCRL(caKeyObj, caNameDer, caPem.expiry);
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/pkix-crl",
+      "Content-Length": caPem.crlDer.length,
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(caPem.crlDer);
+    return true;
+  };
+
   return {
     SNICallback,
     installCA,
     secureContextMap,
+    handleCRL,
   };
 }
 
 // 测试用例
+// import * as http from "http";
 // import * as https from "https";
 /**
  * 以下测试用例涵盖 CertGenerator 与 createSNICallback 的典型使用场景：
  *
- * 测试用例 1: 手动生成 CA 根证书与服务器证书（支持多域名、泛域名、IP、中文国际化域名）并校验
+ * 测试用例 1: 手动生成 CA 根证书、空 CRL 吊销列表与服务器证书（支持多域名、泛域名、IP、中文域名、CRL 分发点）并校验
  * 测试用例 2: 将 CA 根证书导入并信任到 Windows 系统受信任根证书库
- * 测试用例 3: 使用 createSNICallback 搭建动态自适应证书的 HTTPS 服务器
+ * 测试用例 3: 使用 createSNICallback 搭建动态自适应证书的 HTTPS 服务器，并同机启动 HTTP 服务响应 CRL 请求
  *
  * 如需调试测试，可解除下方对应代码块的注释直接运行。
  */
 
 /**
  * ----------------------------------------------------------------------------
- * 测试用例 1: 手动生成 CA 根证书并签发服务器证书
+ * 测试用例 1: 手动生成 CA 根证书、CRL 吊销列表并签发服务器证书
  * ----------------------------------------------------------------------------
  * 演示：
- * 1. 自动生成 10 年有效期的 RSA-2048 自签名 CA 根证书与私钥；
- * 2. 使用 CA 私钥签发服务器证书，涵盖主域名、通配符泛域名、IPv4、IPv6 及中文域名；
- * 3. 将证书写入本地文件并使用 Node.js crypto.X509Certificate 进行结构校验。
+ * 1. 自动生成默认 20 年有效期的 RSA-2048 自签名 CA 根证书与私钥；
+ * 2. 使用 CA 私钥签发空 CRL (Certificate Revocation List)，有效期对齐 CA；
+ * 3. 使用 CA 私钥签发服务器证书（默认 1 年），涵盖主域名、通配符泛域名、IPv4、IPv6、中文域名，并植入 CRL 分发点 URL；
+ * 4. 将证书写入本地文件并使用 Node.js crypto.X509Certificate 进行结构校验。
  */
 // (async () => {
 //   const rootCaName = "My Test CA";
-//   console.log(`⏳ 正在生成 CA 根证书 (RSA-2048, 10年有效期, CN: ${rootCaName})...`);
-//   const caContext = await CertGenerator.createRootCA(rootCaName, 10);
-//   console.log("✅ CA 根证书生成成功！");
+//   const crlUrl = "http://127.0.0.1:8919/ca.crl";
+//   console.log(`⏳ 正在生成 CA 根证书 (RSA-2048, 默认 20 年, CN: ${rootCaName})...`);
+//   const caContext = await CertGenerator.createRootCA(rootCaName);
+//   console.log("✅ CA 根证书生成成功！到期时间:", new Date(caContext.expiry).toISOString());
+//
+//   console.log("⏳ 正在生成 CRL 吊销列表 (有效期对齐 CA)...");
+//   const crlDer = CertGenerator.createCRL(caContext.caKeyObj, caContext.caNameDer, caContext.expiry);
+//   console.log("✅ CRL 吊销列表生成成功！");
 //
 //   // 测试包含：主域名、泛域名、IPv4、IPv6、中文域名
 //   const targetDomains = [
@@ -765,19 +890,21 @@ export function createSNICallback(
 //     "测试.cn",
 //   ];
 //
-//   console.log(`⏳ 正在使用 CA 私钥签发服务器证书，包含域名/IP: ${targetDomains.join(", ")}...`);
+//   console.log(`⏳ 正在使用 CA 私钥签发服务器证书 (默认 1 年)，包含域名/IP: ${targetDomains.join(", ")}，CRL: ${crlUrl}...`);
 //   const serverContext = await CertGenerator.createServerCert(
 //     targetDomains,
 //     caContext.caKeyObj,
 //     caContext.caNameDer,
-//     1, // 1 年有效期
+//     undefined, // 默认 1 年
+//     crlUrl,
 //   );
-//   console.log("✅ 服务器证书签发成功！");
+//   console.log("✅ 服务器证书签发成功！到期时间:", new Date(serverContext.expiry).toISOString());
 //
 //   // 保存为本地文件
 //   await Promise.all([
 //     fs.promises.writeFile("ca.key", caContext.caKeyPem),
 //     fs.promises.writeFile("ca.crt", caContext.caCertPem),
+//     fs.promises.writeFile("ca.crl", crlDer),
 //     fs.promises.writeFile("server.key", serverContext.key),
 //     fs.promises.writeFile("server.crt", serverContext.cert),
 //   ]);
@@ -785,6 +912,7 @@ export function createSNICallback(
 //   console.log("\n✅ 成功！证书文件已写入本地磁盘：");
 //   console.log("   📄 ca.key       (CA 根私钥)");
 //   console.log("   📄 ca.crt       (CA 根证书)");
+//   console.log("   📄 ca.crl       (CA 吊销列表 DER)");
 //   console.log("   📄 server.key   (服务器私钥)");
 //   console.log("   📄 server.crt   (服务器证书链)");
 //
@@ -820,21 +948,39 @@ export function createSNICallback(
 
 /**
  * ----------------------------------------------------------------------------
- * 测试用例 3: 使用 createSNICallback 搭建动态自适应证书的 HTTPS 服务器
+ * 测试用例 3: 使用 createSNICallback 搭建动态自适应证书的 HTTPS 服务器并提供 CRL HTTP 服务
  * ----------------------------------------------------------------------------
  * 演示：
- * 1. 初始化 createSNICallback 并自动安装/信任根 CA；
- * 2. 启动 HTTPS 服务，无论通过任何域名或 IP 访问，服务端均实时按需签发对应域名的证书并缓存；
- * 3. 内存与磁盘二级缓存，并发防击穿保护。
+ * 1. 初始化 createSNICallback 并配置 CRL 分发点地址；
+ * 2. 自动安装/信任根 CA 并生成空 CRL 文件；
+ * 3. 启动 HTTPS 服务，无论通过任何域名或 IP 访问，服务端均实时按需签发对应域名的证书并缓存；
+ * 4. 启动 HTTP 服务，通过 handleCRL 响应 CRL 请求（解决 Windows SChannel / curl 吊销校验报错）；
+ * 5. 内存与磁盘二级缓存，并发防击穿保护。
  */
 // (async () => {
-//   const { SNICallback, installCA } = createSNICallback("PG CA test");
+//   const CRL_PORT = 8919;
+//   const crlUrl = `http://127.0.0.1:${CRL_PORT}/ca.crl`;
+//
+//   const { SNICallback, installCA, handleCRL } = createSNICallback({
+//     rootCaName: "PG CA test",
+//     crlUrl,
+//   });
 //
 //   // 确保 CA 根证书已创建并信任
-//   console.log("⏳ 正在初始化 CA 根证书...");
+//   console.log("⏳ 正在初始化 CA 根证书与 CRL...");
 //   await installCA();
 //
-//   // 创建 HTTPS 服务器并绑定 SNICallback
+//   // 1. 启动 HTTP 吊销列表服务 (响应 CRL 请求)
+//   const crlServer = http.createServer(async (req, res) => {
+//     if (req.url === "/ca.crl" && (await handleCRL(req, res))) return;
+//     res.writeHead(404);
+//     res.end("Not Found");
+//   });
+//   crlServer.listen(CRL_PORT, "127.0.0.1", () => {
+//     console.log(`📡 CRL 吊销查询 HTTP 服务已就绪: ${crlUrl}`);
+//   });
+//
+//   // 2. 创建 HTTPS 服务器并绑定 SNICallback
 //   const server = https.createServer({ SNICallback }, (req, res) => {
 //     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 //     res.end(`<h1>HTTPS 服务运行正常！</h1><p>当前请求 Host: <b>${req.headers.host}</b></p>`);
@@ -844,5 +990,6 @@ export function createSNICallback(
 //   server.listen(PORT, () => {
 //     console.log(`\n🚀 动态证书 HTTPS 服务器已启动: https://localhost:${PORT}`);
 //     console.log(`   访问 https://127.0.0.1 或配置 hosts 访问任意域名测试 SNI 动态签发效果。`);
+//     console.log(`   curl 访问示例: curl https://dev.awolvision.com/`);
 //   });
 // })();
