@@ -8,6 +8,7 @@
  * 1. createRootCA: 生成自签名的 CA 根证书与私钥 (RSA-2048, SHA-256)
  * 2. createServerCert: 使用 CA 私钥签发服务器证书，支持单域名、泛域名 (*.xxx)、多域名、中文域名 (IDN / Punycode)、IPv4 与 IPv6
  * 3. createCRL: 生成符合 RFC 5280 v2 规范的空证书吊销列表 (CRL)
+ * 4. createCSR: 生成符合 RFC 2986 (PKCS#10) 规范的证书签名请求 (CSR) 与私钥
  */
 
 import * as crypto from "crypto";
@@ -61,6 +62,8 @@ export class CertGenerator {
     AD_OCSP: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01]),
     /** 标准扩展: CRL Distribution Points / CRL 分发点 (2.5.29.31 / id-ce-cRLDistributionPoints) */
     CDP: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x1f]),
+    /** 扩展请求属性: Extension Request (1.2.840.113549.1.9.14 / pkcs-9-at-extensionRequest) */
+    EXTENSION_REQUEST: Buffer.from([0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x0e]),
   };
 
   /**
@@ -139,6 +142,35 @@ export class CertGenerator {
   }
 
   /**
+   * 解析并标准化传入的域名/IP列表，构造 SAN (Subject Alternative Name) 与 Common Name
+   *
+   * @param domain 域名或 IP 列表
+   * @returns 标准化后的首个通用名称 (commonName) 与 SAN 扩展条目的 DER 编码数组
+   */
+  private static parseSAN(domain: string | string[]): { commonName: string; sanBuffers: Buffer[] } {
+    const rawList = (Array.isArray(domain) ? domain : [domain])
+      .flatMap(d => d.split(/[,;\s]+/))
+      .map(d => d.trim())
+      .filter(Boolean);
+
+    const sanBuffers: Buffer[] = [];
+    const added = new Set<string>();
+    let commonName = "";
+
+    for (const item of rawList) {
+      const target = url.domainToASCII(item) || item;
+      if (!commonName) commonName = target;
+      if (!added.has(target)) {
+        added.add(target);
+        sanBuffers.push(net.isIP(item) ? ASN1Encoder.ipAddress(item) : ASN1Encoder.dNSName(target));
+      }
+    }
+
+    if (sanBuffers.length === 0) throw new Error("At least one valid domain or IP is required");
+    return { commonName, sanBuffers };
+  }
+
+  /**
    * 生成服务器证书及私钥（由指定的 CA 签发）
    *
    * 特性支持：
@@ -169,6 +201,9 @@ export class CertGenerator {
     crlUrl?: string,
   ) {
     const caKeyObj = caKey instanceof crypto.KeyObject ? caKey : crypto.createPrivateKey(caKey);
+    if (caKeyObj.asymmetricKeyType !== "rsa") {
+      throw new Error(`Unsupported CA key type: ${caKeyObj.asymmetricKeyType}, only RSA is supported`);
+    }
     const caNameDer =
       typeof caCertOrNameDer === "string" || caCertOrNameDer.subarray(0, 30).toString("ascii").includes("-----BEGIN")
         ? ASN1Encoder.extractSubject(caCertOrNameDer)
@@ -184,25 +219,7 @@ export class CertGenerator {
     const sigAlg = ASN1Encoder.sequence(this.OID.SHA256_RSA, Buffer.from([0x05, 0x00]));
 
     // 解析并标准化传入的域名/IP列表，构造 SAN 与 Common Name
-    const rawList = (Array.isArray(domain) ? domain : [domain])
-      .flatMap(d => d.split(/[,;\s]+/))
-      .map(d => d.trim())
-      .filter(Boolean);
-
-    const sanBuffers: Buffer[] = [];
-    const added = new Set<string>();
-    let commonName = "";
-
-    for (const item of rawList) {
-      const target = url.domainToASCII(item) || item;
-      if (!commonName) commonName = target;
-      if (!added.has(target)) {
-        added.add(target);
-        sanBuffers.push(net.isIP(item) ? ASN1Encoder.ipAddress(item) : ASN1Encoder.dNSName(target));
-      }
-    }
-
-    if (sanBuffers.length === 0) throw new Error("At least one valid domain or IP is required");
+    const { commonName, sanBuffers } = this.parseSAN(domain);
 
     // Server Subject
     const subjectDer = ASN1Encoder.sequence(
@@ -267,10 +284,19 @@ export class CertGenerator {
     // 3. 使用内存中的 CA 私钥对 Server 证书签名
     const signature = crypto.sign("sha256", tbs, caKeyObj);
     const certDer = ASN1Encoder.sequence(tbs, sigAlg, ASN1Encoder.bitString(signature));
+    const serverCertPem = ASN1Encoder.toPem("CERTIFICATE", certDer);
+
+    // 仅当传入的是有效 CA 证书 PEM 时才拼接完整证书链，避免传入 caNameDer 时拼接二进制乱码
+    const caCertPem =
+      typeof caCertOrNameDer === "string" && caCertOrNameDer.includes("-----BEGIN CERTIFICATE-----")
+        ? caCertOrNameDer
+        : Buffer.isBuffer(caCertOrNameDer) && caCertOrNameDer.toString("ascii").includes("-----BEGIN CERTIFICATE-----")
+          ? caCertOrNameDer.toString("utf8")
+          : "";
 
     return {
       key: ASN1Encoder.toPem("PRIVATE KEY", privateKey.export({ type: "pkcs8", format: "der" })),
-      cert: ASN1Encoder.toPem("CERTIFICATE", certDer) + String(caCertOrNameDer),
+      cert: caCertPem ? serverCertPem + caCertPem : serverCertPem,
       expiry: notAfter.getTime(),
     };
   }
@@ -312,17 +338,86 @@ export class CertGenerator {
     const signature = crypto.sign("sha256", tbsCertList, caKey);
     return ASN1Encoder.sequence(tbsCertList, sigAlg, ASN1Encoder.bitString(signature));
   }
+
+  /**
+   * 生成 CSR (Certificate Signing Request) 证书签名请求及私钥 (RFC 2986 / PKCS#10)
+   *
+   * 构造规范 (符合 RFC 2986 / PKCS#10)：
+   * 1. 结构: CertificationRequestInfo (version 0, subject, subjectPKInfo, attributes) + sigAlg + signature
+   * 2. 签名算法: SHA-256 with RSA (sha256WithRSAEncryption)
+   * 3. 属性 (Attributes): 植入 extensionRequest (1.2.840.113549.1.9.14)，携带完整的 SAN 扩展
+   * 4. 域名与 IP: 支持单域名、多域名、泛域名 (*.example.com)、localhost、IPv4 与 IPv6，支持中文 IDN 自动转 Punycode
+   * 5. 密钥支持: 可传入已有私钥，或不传则自动异步生成 2048 位 RSA 密钥对
+   *
+   * @param domain 域名或 IP，支持单个字符串（支持逗号/空格分隔多个）或字符串数组
+   * @param key 可选的私钥 (KeyObject、PEM 字符串或 DER Buffer)。不传则自动生成 2048 位 RSA 密钥对
+   * @returns 返回包含私钥及 CSR 证书签名请求的对象：
+   *   - `key`: PKCS#8 格式的私钥 PEM 字符串
+   *   - `csr`: PKCS#10 格式的证书签名请求 PEM 字符串 (-----BEGIN CERTIFICATE REQUEST-----)
+   *   - `keyObj`: 内存中的 KeyObject 私钥对象
+   */
+  public static async createCSR(
+    domain: string | string[],
+    key?: crypto.KeyObject | string | Buffer,
+  ): Promise<{ key: string; csr: string; keyObj: crypto.KeyObject }> {
+    let privateKey: crypto.KeyObject;
+    if (key) {
+      privateKey = key instanceof crypto.KeyObject ? key : crypto.createPrivateKey(key);
+    } else {
+      const generated = await generateRsaKey();
+      privateKey = generated.privateKey;
+    }
+    if (privateKey.asymmetricKeyType !== "rsa") {
+      throw new Error(`Unsupported key type: ${privateKey.asymmetricKeyType}, only RSA is supported`);
+    }
+    const publicKey = crypto.createPublicKey(privateKey);
+    const pubKeyDer = publicKey.export({ type: "spki", format: "der" });
+
+    // 1. CertificationRequestInfo 字段构造
+    // version: v1 (INTEGER 0)
+    const version = Buffer.from([0x02, 0x01, 0x00]);
+
+    // Subject 与 SAN
+    const { commonName, sanBuffers } = this.parseSAN(domain);
+    const subjectDer = ASN1Encoder.sequence(
+      ASN1Encoder.set(ASN1Encoder.sequence(this.OID.COMMON_NAME, ASN1Encoder.utf8String(commonName))),
+    );
+
+    // Attributes: 构造 extensionRequest (1.2.840.113549.1.9.14) 属性并植入 SAN 扩展
+    const sanExt = ASN1Encoder.sequence(this.OID.SAN, ASN1Encoder.octetString(ASN1Encoder.sequence(...sanBuffers)));
+    const extReqAttr = ASN1Encoder.sequence(
+      this.OID.EXTENSION_REQUEST,
+      ASN1Encoder.set(ASN1Encoder.sequence(sanExt)),
+    );
+    // [0] IMPLICIT Attributes
+    const attributes = Buffer.concat([Buffer.from([0xa0]), ASN1Encoder.encodeLength(extReqAttr.length), extReqAttr]);
+
+    // CertificationRequestInfo
+    const cri = ASN1Encoder.sequence(version, subjectDer, pubKeyDer, attributes);
+
+    // 2. 使用申请者私钥自签名
+    const sigAlg = ASN1Encoder.sequence(this.OID.SHA256_RSA, Buffer.from([0x05, 0x00]));
+    const signature = crypto.sign("sha256", cri, privateKey);
+    const csrDer = ASN1Encoder.sequence(cri, sigAlg, ASN1Encoder.bitString(signature));
+
+    return {
+      key: ASN1Encoder.toPem("PRIVATE KEY", privateKey.export({ type: "pkcs8", format: "der" })),
+      csr: ASN1Encoder.toPem("CERTIFICATE REQUEST", csrDer),
+      keyObj: privateKey,
+    };
+  }
 }
 
 // ============================================================================
-// 测试用例 / 使用示例: 手动生成 CA 根证书、CRL 吊销列表并签发服务器证书
+// 测试用例 / 使用示例: 手动生成 CA 根证书、CRL 吊销列表、CSR 证书签名请求并签发服务器证书
 // ============================================================================
 /**
  * 演示：
  * 1. 自动生成默认 20 年有效期的 RSA-2048 自签名 CA 根证书与私钥；
  * 2. 使用 CA 私钥签发空 CRL (Certificate Revocation List)，有效期对齐 CA；
- * 3. 使用 CA 私钥签发服务器证书（默认 1 年），涵盖主域名、通配符泛域名、IPv4、IPv6、中文域名，并植入 CRL 分发点 URL；
- * 4. 将生成的证书和私钥写入本地文件，并使用 Node.js 原生 crypto.X509Certificate 进行结构校验与属性打印。
+ * 3. 生成符合 PKCS#10 规范的 CSR (Certificate Signing Request) 证书签名请求与私钥；
+ * 4. 使用 CA 私钥签发服务器证书（默认 1 年），涵盖主域名、通配符泛域名、IPv4、IPv6、中文域名，并植入 CRL 分发点 URL；
+ * 5. 将生成的证书和私钥写入本地文件，并使用 Node.js 原生 crypto.X509Certificate 进行结构校验与属性打印。
  *
  * 如需调试测试，可解除下方对应代码块的注释直接运行。
  */
@@ -349,11 +444,15 @@ export class CertGenerator {
 //     "测试.cn",
 //   ];
 //
+//   console.log(`⏳ 正在生成 CSR 证书签名请求 (PKCS#10)，包含域名/IP: ${targetDomains.join(", ")}...`);
+//   const csrContext = await CertGenerator.createCSR(targetDomains);
+//   console.log("✅ CSR 证书签名请求生成成功！");
+//
 //   console.log(`⏳ 正在使用 CA 私钥签发服务器证书 (默认 1 年)，包含域名/IP: ${targetDomains.join(", ")}，CRL: ${crlUrl}...`);
 //   const serverContext = await CertGenerator.createServerCert(
 //     targetDomains,
 //     caContext.caKeyObj,
-//     caContext.caNameDer,
+//     caContext.caCertPem,
 //     undefined, // 默认 1 年
 //     crlUrl,
 //   );
@@ -364,6 +463,7 @@ export class CertGenerator {
 //     fs.promises.writeFile(path.resolve("./ca.key"), caContext.caKeyPem),
 //     fs.promises.writeFile(path.resolve("./ca.crt"), caContext.caCertPem),
 //     fs.promises.writeFile(path.resolve("./ca.crl"), crlDer),
+//     fs.promises.writeFile(path.resolve("./server.csr"), csrContext.csr),
 //     fs.promises.writeFile(path.resolve("./server.key"), serverContext.key),
 //     fs.promises.writeFile(path.resolve("./server.crt"), serverContext.cert),
 //   ]);
@@ -372,6 +472,7 @@ export class CertGenerator {
 //   console.log("   📄 ca.key       (CA 根私钥)");
 //   console.log("   📄 ca.crt       (CA 根证书)");
 //   console.log("   📄 ca.crl       (CA 吊销列表 DER)");
+//   console.log("   📄 server.csr   (CSR 证书签名请求)");
 //   console.log("   📄 server.key   (服务器私钥)");
 //   console.log("   📄 server.crt   (服务器证书链)");
 //
@@ -383,4 +484,6 @@ export class CertGenerator {
 //   console.log("   - Valid From (生效时间):", x509.validFrom);
 //   console.log("   - Valid To (到期时间):", x509.validTo);
 //   console.log("   - SAN (主题备用名称):", x509.subjectAltName);
+//   console.log("\n📋 CSR 证书签名请求预览 (前 2 行):");
+//   console.log(csrContext.csr.split("\n").slice(0, 2).join("\n") + "\n...");
 // })();
