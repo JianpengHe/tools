@@ -1,7 +1,7 @@
 // 导入Node.js的stream模块，用于处理流数据
 import * as stream from "stream";
 // 导入自定义的IReadStream接口，定义了可读流的基本结构
-import { IReadStream } from "./utils";
+import { IReadStream } from "../util/utils";
 
 // 定义读取缓冲区的函数类型，可以指定固定大小或通过判断函数确定读取长度
 export type IRecvStreamReadBuffer = (

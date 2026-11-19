@@ -5,7 +5,7 @@ import * as fs from "fs";
 import * as tls from "tls";
 import * as zlib from "zlib";
 import * as path from "path";
-import { getHash, recvAll, sleep } from "./utils";
+import { getHash, recvAll, sleep } from "../util/utils";
 
 export type IWebCrawlerRequest = https.RequestOptions & { body?: Buffer | string };
 export type IWebCrawlerResponse = http.IncomingMessage & { body?: Buffer | string };

@@ -18,13 +18,13 @@ import * as zlib from "zlib";
 import * as dns from "dns";
 import * as crypto from "crypto";
 import { TcpProxy } from "./TcpProxy";
-import { recvAll } from "./utils";
+import { recvAll } from "../util/utils";
 import {
   EOperatingSystemHttpProxyStatus,
   getProcessNameByPort,
   IOperatingSystemHttpProxyOpt,
   OperatingSystemHttpProxy,
-} from "./systemNetworkSettings";
+} from "../util/systemNetworkSettings";
 import { DnsServer, EDnsResolveType } from "./dnsService";
 
 /** 客户端（浏览器）发送的请求，还没有到达目标服务器前 */

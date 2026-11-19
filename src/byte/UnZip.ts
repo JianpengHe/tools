@@ -10,7 +10,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as zlib from "zlib";
 import { Buf } from "./Buf";
-import { IReadStream } from "./utils";
+import { IReadStream } from "../util/utils";
 import { RecvStream } from "./RecvStream";
 
 /**

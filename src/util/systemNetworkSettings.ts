@@ -17,8 +17,8 @@ import * as net from "net";
 import * as tls from "tls";
 import * as crypto from "crypto";
 import { afterExit } from "./afterExit";
-import { Buf } from "./Buf";
-import { RecvStream } from "./RecvStream";
+import { Buf } from "../byte/Buf";
+import { RecvStream } from "../byte/RecvStream";
 import { childProcessExec } from "./utils";
 
 /**

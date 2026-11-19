@@ -11,8 +11,8 @@ import * as dgram from "dgram";
 import * as net from "net";
 import * as os from "os";
 import * as child_process from "child_process";
-import { Buf } from "./Buf";
-import { getOccupiedNetworkPortPids, setDnsAddr } from "./systemNetworkSettings";
+import { Buf } from "../byte/Buf";
+import { getOccupiedNetworkPortPids, setDnsAddr } from "../util/systemNetworkSettings";
 
 /**
  * DNS记录类型枚举

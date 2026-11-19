@@ -1,6 +1,6 @@
 /** 轻量级 Web 服务器实现 */
 import * as http from "http";
-import { JWT } from "./JWT";
+import { JWT } from "../cert/JWT";
 
 /** 任意键值对类型 */
 type RecordAny = Record<string, any>;

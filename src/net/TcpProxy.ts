@@ -3,8 +3,8 @@ import * as dns from "dns";
 import * as fs from "fs";
 import * as os from "os";
 import { DnsServer } from "./dnsService";
-import { afterExit } from "./afterExit";
-import { childProcessExec } from "./utils";
+import { afterExit } from "../util/afterExit";
+import { childProcessExec } from "../util/utils";
 
 const modifyHostsFile = (hostsFile: string[], host: string, ip: string) => {
   let oldIp = "";

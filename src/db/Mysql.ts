@@ -2,12 +2,12 @@
  * MySQL客户端实现
  * 提供与MySQL数据库通信的功能，支持预处理语句、流式数据传输等高级特性
  */
-import { Buf, getNumberLen } from "./Buf";
+import { Buf, getNumberLen } from "../byte/Buf";
 import * as net from "net";
 import * as stream from "stream";
-import { ReliableSocket } from "./ReliableSocket";
-import { RecvStream } from "./RecvStream";
-import { getHash, TypedEventEmitter } from "./utils";
+import { ReliableSocket } from "../net/ReliableSocket";
+import { RecvStream } from "../byte/RecvStream";
+import { getHash, TypedEventEmitter } from "../util/utils";
 
 /**
  * MySQL专用缓冲区类

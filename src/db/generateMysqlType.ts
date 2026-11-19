@@ -1,4 +1,4 @@
-import { EMysqlFieldType, IMysqlValue, Mysql } from "../node/Mysql";
+import { EMysqlFieldType, IMysqlValue, Mysql } from "./Mysql";
 const conversion: Record<number, "string" | "number" | "Date" | "Buffer"> = {
   // 字符串类型
   [EMysqlFieldType.string]: "string",

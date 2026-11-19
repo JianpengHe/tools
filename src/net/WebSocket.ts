@@ -3,8 +3,8 @@ import * as http from "http";
 import * as https from "https";
 import * as stream from "stream";
 import * as crypto from "crypto";
-import { RecvStreamPro } from "./RecvStreamPro";
-import { TypedEventEmitter } from "./utils";
+import { RecvStreamPro } from "../byte/RecvStreamPro";
+import { TypedEventEmitter } from "../util/utils";
 
 // 定义WebSocket操作码的枚举类型
 export enum EWebSocketOpcode {
