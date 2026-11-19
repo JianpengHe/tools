@@ -271,39 +271,10 @@ export class RecvStreamPro extends stream.Writable {
 
     return taskReadable;
   }
+  static isPromise<T>(val: T | Promise<T>): val is Promise<T> {
+    return val instanceof Promise;
+  }
 }
-
-// function sync<P extends any[], R>(fn: (callback: (v: R) => void, ...args: P) => void, ...args: P): R | Promise<R> {
-//   let returnValue: ((value: R) => void) | R | undefined;
-//   fn(
-//     v => {
-//       if (returnValue) {
-//         // @ts-ignore
-//         returnValue(v);
-//         return;
-//       }
-//       returnValue = v;
-//     },
-//     ...args,
-//   );
-//   return (returnValue ||
-//     new Promise<R>(r => {
-//       returnValue = r;
-//     })) as Promise<R> | R;
-// }
-
-// var a = () => true;
-
-// (async () => {
-//   await a();
-//   console.log(1);
-//   (async () => {
-//     await a();
-//     console.log(2);
-//   })();
-//   console.log(3);
-// })();
-// console.log(4);
 
 // 测试用例
 // import * as fs from "fs";
