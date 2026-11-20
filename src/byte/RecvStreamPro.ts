@@ -24,6 +24,7 @@ export class RecvStreamPro extends stream.Writable {
 
   /** 新建task */
   public addTask(task: IRecvStreamProTask) {
+    if (this.isFinal) throw new Error("流已经结束，无法添加新任务");
     this.taskQueue.push(task);
     this.cleanTask().catch(err => this.destroy(err));
   }
@@ -39,7 +40,7 @@ export class RecvStreamPro extends stream.Writable {
       while (this.task || (this.task = this.taskQueue.shift())) {
         /** 已读的数据未能满足需求 */
         if (this.lastBuffer.length < this.task.needReadSize) {
-          if (this.isFinal) {
+          if (this.writableEnded || this.destroyed) {
             /** 流结束了，但还有未完成的任务 */
             const res = this.task.onData(this.task);
             if (res instanceof Promise) await res;
@@ -60,6 +61,8 @@ export class RecvStreamPro extends stream.Writable {
           this.task = undefined;
         }
       }
+
+      if ((this.writableEnded || this.destroyed) && this.lastBuffer.length === 0) this.isFinal = true;
     } catch (err) {
       // 捕捉任务执行中的异常，通知上游并销毁流
       if (this.callback) {
@@ -91,29 +94,39 @@ export class RecvStreamPro extends stream.Writable {
 
   public isFinal = false;
 
+  private finalFn(error: Error | null, callback: (error?: Error | null | undefined) => void): void {
+    this.readableError = error;
+    this.cleanTask().finally(() => {
+      if (this.lastBuffer.length === 0) this.isFinal = true;
+      callback(error);
+    });
+  }
+
   public _final(callback: (error?: Error | null | undefined) => void): void {
-    this.isFinal = true;
-    this.cleanTask()
-      .then(() => callback(null))
-      .catch(callback);
+    this.finalFn(null, callback);
   }
 
   public readableError: Error | null = null;
 
   public _destroy(error: Error | null, callback: (error?: Error | null | undefined) => void): void {
-    this.readableError = error;
-    this.isFinal = true;
-    this.cleanTask()
-      .then(() => callback(error))
-      .catch(callback);
+    this.finalFn(error, callback);
   }
 
   /** 读取特定长度的buffer */
   public readBuffer(size: number) {
     let returnValue: ((buffer: Buffer) => void) | Buffer | undefined;
+    let rejectValue: ((err: Error) => void) | undefined;
     this.addTask({
       needReadSize: size,
       onData: task => {
+        if (this.lastBuffer.length < task.needReadSize && (this.writableEnded || this.destroyed)) {
+          const err = this.readableError ?? new Error(`剩余${task.needReadSize}字节未读取，但输入流已经结束`);
+          if (typeof rejectValue === "function") {
+            rejectValue(err);
+            return;
+          }
+          throw err;
+        }
         const buf = this.lastBuffer.subarray(0, size);
         this.lastBuffer = this.lastBuffer.subarray(size);
         task.needReadSize -= buf.length;
@@ -125,8 +138,9 @@ export class RecvStreamPro extends stream.Writable {
       },
     });
     return (returnValue ||
-      new Promise<Buffer>(resolve => {
+      new Promise<Buffer>((resolve, reject) => {
         returnValue = resolve;
+        rejectValue = reject;
       })) as Promise<Buffer> | Buffer;
   }
 
@@ -147,7 +161,7 @@ export class RecvStreamPro extends stream.Writable {
       onData: task => {
         /** 满足要求前，流已经结束 */
         if (recvStream.lastBuffer.length === 0) {
-          taskReadable.destroy(new Error(`剩余${lastSize}字节未读取，但输入流已经结束`));
+          taskReadable.destroy(recvStream.readableError ?? new Error(`剩余${lastSize}字节未读取，但输入流已经结束`));
           return;
         }
 
@@ -175,19 +189,19 @@ export class RecvStreamPro extends stream.Writable {
     if (tempBufferMinSize < 1) throw new Error("至少读一个字节到缓存里，不然会导致死循环");
 
     let returnValue: ((buffer: Buffer) => void) | Buffer | undefined;
+    let rejectValue: ((err: Error) => void) | undefined;
     let taskTempBuffer: Buffer = Buffer.allocUnsafe(0);
     this.addTask({
       needReadSize: tempBufferMinSize,
       onData: task => {
         /** 满足要求前，流已经结束 */
         if (this.lastBuffer.length === 0) {
-          const buf = taskTempBuffer.length ? taskTempBuffer : Buffer.alloc(0);
-          if (typeof returnValue === "function") {
-            returnValue(buf);
+          const err = this.readableError ?? new Error("未找到匹配的数据，输入流已经结束");
+          if (typeof rejectValue === "function") {
+            rejectValue(err);
             return;
           }
-          returnValue = buf;
-          return;
+          throw err;
         }
 
         // 计算上一次搜索未覆盖到的起始点，防止跨 Chunk 模式匹配漏掉
@@ -201,6 +215,14 @@ export class RecvStreamPro extends stream.Writable {
 
         /** 还没结束，还没读到特定规则 */
         if (relativeIndex < 0) {
+          if (this.writableEnded || this.destroyed) {
+            const err = this.readableError ?? new Error("未找到匹配的数据，输入流已经结束");
+            if (typeof rejectValue === "function") {
+              rejectValue(err);
+              return;
+            }
+            throw err;
+          }
           return;
         }
 
@@ -218,8 +240,9 @@ export class RecvStreamPro extends stream.Writable {
       },
     });
     return (returnValue ||
-      new Promise<Buffer>(r => {
+      new Promise<Buffer>((r, rej) => {
         returnValue = r;
+        rejectValue = rej;
       })) as Promise<Buffer> | Buffer;
   }
 
@@ -240,7 +263,7 @@ export class RecvStreamPro extends stream.Writable {
       onData: task => {
         /** 满足要求前，流已经结束 */
         if (recvStream.lastBuffer.length === 0) {
-          taskReadable.destroy(new Error(`在满足要求前，输入流已经结束`));
+          taskReadable.destroy(recvStream.readableError ?? new Error(`在满足要求前，输入流已经结束`));
           return;
         }
         taskTempBuffer = Buffer.concat([taskTempBuffer, recvStream.lastBuffer]);
