@@ -166,7 +166,7 @@ export function getHash(
   encoding?: crypto.BinaryToTextEncoding,
 ): string | Buffer {
   // 创建哈希对象并更新数据
-  const hash = crypto.createHash(algorithm).update(data);
+  const hash = crypto.createHash(algorithm).update(data as any);
   // 根据是否提供编码返回不同类型的结果
   if (encoding) {
     return hash.digest(encoding);

@@ -10,7 +10,7 @@
   "author": "JianpengHe",
   "license": "ISC",
   "devDependencies": {
-    "@types/node": "^22.10.1",
+    "@types/node": "^26.6.6",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2"
   },

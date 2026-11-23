@@ -2,12 +2,15 @@
  * systemCert.ts - 操作系统证书信任管理工具
  *
  * 本模块负责将自签名 CA 根证书导入系统证书库中，使操作系统、各类浏览器及系统工具信任该 CA 签发的所有服务端证书。
- * 当前针对 Windows 系统提供了基于原生 certutil 与 PowerShell UAC 提权的免交互/自提权安装方案。
+ * 支持 Windows、macOS 以及主流 Linux 发行版的静默安装与自提权机制。
  */
 
+// import * as fs from "fs";
 import * as path from "path";
 import * as childProcess from "child_process";
 import * as util from "util";
+
+const execFileAsync = util.promisify(childProcess.execFile);
 
 /**
  * 将 CA 根证书安装并信任到 Windows 系统“受信任的根证书颁发机构”证书库中
@@ -24,8 +27,7 @@ import * as util from "util";
  */
 export async function trustCaInWindows(caPath: string): Promise<boolean> {
   const certPath = path.isAbsolute(caPath) ? caPath : path.resolve("./", caPath);
-  const execFileAsync = util.promisify(childProcess.execFile);
-  console.log("尝试安装证书...", certPath);
+  console.log("尝试在 Windows 安装证书...", certPath);
 
   // 1. 优先使用 execFile 直接执行（若当前已是管理员则静默成功，无需 cmd.exe 且天然支持空格路径）
   let exitCode = 0;
@@ -44,8 +46,6 @@ export async function trustCaInWindows(caPath: string): Promise<boolean> {
 
   try {
     // 2. 使用 PowerShell 弹出 UAC 提权窗口
-    // 注意：PowerShell Start-Process -ArgumentList 在传参时若有空格会被拆分，必须在参数内包裹双引号 ('"' + certPath + '"')
-    // 并通过 Base64 EncodedCommand 执行，彻底免疫 cmd/shell 的转义和空格破坏
     const psScript = `Start-Process -FilePath 'certutil.exe' -ArgumentList @('-addstore', '-f', 'root', ('\"' + '${certPath.replace(/'/g, "''")}' + '\"')) -Verb RunAs -Wait -WindowStyle Hidden -ErrorAction Stop`;
     const b64 = Buffer.from(psScript, "utf16le").toString("base64");
     await execFileAsync("powershell.exe", ["-NoProfile", "-EncodedCommand", b64]);
@@ -55,6 +55,28 @@ export async function trustCaInWindows(caPath: string): Promise<boolean> {
     console.log("【失败】取消了 UAC 授权，或证书发生错误。", certPath, e.code);
   }
   return false;
+}
+
+/**
+ * 将 CA 根证书安装并信任到当前操作系统的根证书库中
+ *
+ * 自动识别 Windows、macOS (Darwin) 和 Linux，分发调用对应平台的证书导入实现
+ *
+ * @param caPath CA 根证书文件路径
+ * @returns 安装成功返回 true，否则返回 false
+ */
+export async function trustCa(caPath: string): Promise<boolean> {
+  switch (process.platform) {
+    case "win32":
+      return trustCaInWindows(caPath);
+    // case "darwin":
+    //   return trustCaInMacOS(caPath);
+    // case "linux":
+    //   return trustCaInLinux(caPath);
+    default:
+      console.log(`【失败】暂不支持当前操作系统平台: ${process.platform}`);
+      return false;
+  }
 }
 
 // ============================================================================

@@ -10,7 +10,7 @@
  * 3. 内存 SecureContext 缓存：在内存中维护 SecureContext 映射，大幅提升 TLS 握手性能；
  * 4. LRU / FIFO 淘汰：缓存数量达到 maxHostCount 时自动淘汰最早建立的安全上下文；
  * 5. 防缓存击穿 (Pending Promise Map)：针对同一域名的并发请求进行合并，避免高并发下重复签发；
- * 6. CA 自动就绪：首次调用自动生成根 CA 并通过 trustCaInWindows 注册到系统受信任根证书库；
+ * 6. CA 自动就绪与信任检测：首次调用自动生成根 CA，通过 isCaTrustedByOS 检测系统信任状态，并可通过注入的 trustCa 导入系统受信任根证书库；
  * 7. CRL 吊销列表：当配置 crlUrl 时，自动生成空 CRL 文件并提供 handleCRL 方法响应 HTTP 请求。
  */
 
@@ -22,7 +22,6 @@ import * as tls from "tls";
 import * as http from "http";
 import { ASN1Encoder } from "./ASN1Encoder";
 import { CertGenerator } from "./CertGenerator";
-import { trustCaInWindows } from "./systemCert";
 
 /**
  * 异步读取指定文件为 Buffer
@@ -71,6 +70,39 @@ async function getCert(keyPath: string, certPath: string) {
 }
 
 /**
+ * 检查当前操作系统是否已信任指定的 CA 证书
+ *
+ * 基于 Node.js 内置的 `tls.getCACertificates("system")` 读取操作系统信任根证书列表，
+ * 并与目标 CA 证书逐一比对原始 DER 二进制内容（X.509 raw Buffer）。
+ *
+ * @param targetCaPem 待检查的目标 CA 证书（PEM 格式字符串）
+ * @returns
+ *   - `true`: 操作系统已信任该证书；
+ *   - `false`: 当前 Node.js 支持系统证书库读取，且该证书未被信任；
+ *   - `null`: 当前 Node.js 运行时不支持 `tls.getCACertificates`（低于 Node.js 22.3.0）或证书内容无效。
+ */
+export function isCaTrustedByOS(targetCaPem: string): boolean | null {
+  try {
+    // 解析目标 CA 证书，提取原始 DER 二进制内容 (Buffer)
+    const targetRaw = new crypto.X509Certificate(targetCaPem).raw;
+
+    // 遍历并直接比对二进制内容
+    return (
+      tls.getCACertificates?.("system")?.some(pem => {
+        try {
+          return new crypto.X509Certificate(pem).raw.equals(targetRaw);
+        } catch {
+          return false;
+        }
+      }) ?? null
+    );
+  } catch (e) {
+    console.error("检查CA是否信任失败:", e);
+    return null;
+  }
+}
+
+/**
  * 创建用于 TLS / HTTPS 服务的动态 SNI (Server Name Indication) 回调函数
  *
  * @param opt 配置选项
@@ -78,6 +110,7 @@ async function getCert(keyPath: string, certPath: string) {
  * @param opt.maxHostCount 内存中最大缓存的 SecureContext 数量，默认 100
  * @param opt.certDiskPath 证书本地磁盘持久化目录，默认为当前用户目录下的 AppData/Local/${rootCaName}
  * @param opt.crlUrl CRL 分发点 HTTP URL（如 "http://127.0.0.1:8919/ca.crl"），为空则不启用 CRL 功能
+ * @param opt.trustCa 自定义 CA 根证书系统信任安装函数（例如接入 systemCert.ts 的 trustCa 实现）
  * @returns 返回包含以下属性的对象：
  *   - `SNICallback`: 可直接用于 tls.createServer 或 https.createServer 的 SNICallback 函数
  *   - `installCA`: 确保根 CA 证书生成并安装到系统的初始化方法
@@ -90,6 +123,7 @@ export function createSNICallback(
     maxHostCount?: number;
     certDiskPath?: string;
     crlUrl?: string;
+    trustCa?: (caPath: string) => Promise<boolean>;
   } = {},
 ) {
   const {
@@ -97,6 +131,7 @@ export function createSNICallback(
     maxHostCount = 100,
     certDiskPath = path.resolve(os.homedir(), "AppData", "Local", opt.rootCaName || "PG CA test"),
     crlUrl,
+    trustCa = async path => Boolean(console.log(`请传入trustCa函数或手动信任${path}的CA根证书`)),
   } = opt;
   let caPem: (NonNullable<Awaited<ReturnType<typeof getCert>>> & { crlDer?: Buffer }) | null = null;
   let installCAPromise: Promise<void> | undefined;
@@ -183,20 +218,15 @@ export function createSNICallback(
         const caKeyPath = path.resolve(certDiskPath, "ca.key");
         const caCertPath = path.resolve(certDiskPath, "ca.crt");
         caPem = await getCert(caKeyPath, caCertPath);
-        if (caPem) return;
+        if (caPem) {
+          if (isCaTrustedByOS(caPem.cert) === false) await trustCa(caCertPath);
+          return;
+        }
         let { caKeyPem, caCertPem, expiry } = await CertGenerator.createRootCA(rootCaName);
         if (!caKeyPem || !caCertPem) throw new Error("自动生成CA证书失败");
         await fs.promises.mkdir(certDiskPath, { recursive: true });
-        await Promise.all([
-          fs.promises.writeFile(caKeyPath + ".not.trusted", caKeyPem),
-          fs.promises.writeFile(caCertPath, caCertPem),
-        ]);
-        if (await trustCaInWindows(caCertPath)) {
-          await fs.promises.rename(caKeyPath + ".not.trusted", caKeyPath);
-        } else {
-          console.log("CA证书安装失败，操作系统可能不信任该证书");
-          expiry = 0;
-        }
+        await Promise.all([fs.promises.writeFile(caKeyPath, caKeyPem), fs.promises.writeFile(caCertPath, caCertPem)]);
+        await trustCa(caCertPath);
         caPem = {
           key: caKeyPem,
           cert: caCertPem,
@@ -249,8 +279,8 @@ export function createSNICallback(
 // ============================================================================
 /**
  * 演示：
- * 1. 初始化 createSNICallback 并配置根 CA 名称与 CRL 分发点地址；
- * 2. 自动生成并信任根 CA（首次运行自动触发系统安装）；
+ * 1. 结合 systemCert 的 trustCa 初始化 createSNICallback，配置根 CA 名称与 CRL 分发点；
+ * 2. 自动检测系统是否已信任根 CA（基于 isCaTrustedByOS），并在未信任时自动触发系统静默/提权安装；
  * 3. 启动同机 HTTP 基础服务，通过 handleCRL 响应 CRL 吊销请求；
  * 4. 启动 HTTPS 服务并绑定 SNICallback：
  *    - 任意域名访问（如 https://localhost:443、https://127.0.0.1:443 或 hosts 自定义域名）；
@@ -261,15 +291,17 @@ export function createSNICallback(
  */
 // (async () => {
 //   const https = await import("https");
+//   const { trustCa } = await import("./systemCert");
 //   const CRL_PORT = 8919;
 //   const crlUrl = `http://127.0.0.1:${CRL_PORT}/ca.crl`;
 //
 //   const { SNICallback, installCA, handleCRL } = createSNICallback({
 //     rootCaName: "PG CA test",
 //     crlUrl,
+//     trustCa, // 注入系统根证书安装函数 (支持 Windows certutil / UAC 自提权)
 //   });
 //
-//   // 1. 初始化并确保 CA 根证书就绪（若未信任将触发系统导入）
+//   // 1. 初始化并确保 CA 根证书就绪（内部通过 isCaTrustedByOS 自动检测，未信任时才调用 trustCa）
 //   console.log("⏳ 正在初始化 CA 根证书与 CRL...");
 //   await installCA();
 //
