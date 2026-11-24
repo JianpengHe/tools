@@ -22,6 +22,7 @@ import * as tls from "tls";
 import * as http from "http";
 import { ASN1Encoder } from "./ASN1Encoder";
 import { CertGenerator } from "./CertGenerator";
+import { MapPro, EMapProEvictionPolicy } from "../util/MapPro";
 
 /**
  * 异步读取指定文件为 Buffer
@@ -135,16 +136,17 @@ export function createSNICallback(
   } = opt;
   let caPem: (NonNullable<Awaited<ReturnType<typeof getCert>>> & { crlDer?: Buffer }) | null = null;
   let installCAPromise: Promise<void> | undefined;
-  const secureContextMap = new Map<string, { ctx: tls.SecureContext; expiry: number }>();
-  const secureContexPendingPromiseMap = new Map<string, Promise<void>>();
 
   /**
-   * 异步创建指定域名的 SecureContext
-   * 优先从磁盘加载，若无则使用 CA 动态签发并持久化到本地
+   * 基于 MapPro 维护 SecureContext 内存缓存：
+   * - LRU 淘汰：达到 maxHostCount 时自动淘汰最久未访问的上下文
+   * - 自动 Singleflight：同一域名的并发请求自动去重，避免重复签发
    */
-  const createSecureContext = async (servername: string) => {
-    console.log("createSecureContext", servername);
-    try {
+  const secureContextMap = new MapPro<string, { ctx: tls.SecureContext; expiry: number }>({
+    evictionPolicy: EMapProEvictionPolicy.LRU,
+    cacheSize: maxHostCount,
+    init: async servername => {
+      console.log("createSecureContext", servername);
       const certPath = path.resolve(certDiskPath, servername + ".crt");
       const keyPath = path.resolve(certDiskPath, servername + ".key");
       let pem = await getCert(keyPath, certPath);
@@ -162,16 +164,9 @@ export function createSNICallback(
         key: pem.key,
         cert: pem.cert,
       });
-      if (secureContextMap.size >= maxHostCount) {
-        /** 如果超过最大连接数，删除最早连接的 */
-        console.log("删除最早连接的");
-        secureContextMap.delete(secureContextMap.keys().next()?.value || "");
-      }
-      secureContextMap.set(servername, { ctx, expiry: pem.expiry });
-    } finally {
-      secureContexPendingPromiseMap.delete(servername);
-    }
-  };
+      return { ctx, expiry: pem.expiry };
+    },
+  });
 
   /**
    * SNI 握手回调函数
@@ -182,24 +177,17 @@ export function createSNICallback(
     try {
       if (servername === "") throw new Error("servername is empty");
       if (/[\\/:*?"<>|]/.test(servername)) throw new Error("servername contain invalid char");
-      let times = 3;
-      do {
-        const secureContext = secureContextMap.get(servername);
-        if (secureContext) {
-          if (secureContext.expiry > Date.now()) return callback(null, secureContext.ctx);
-          console.log("证书过期");
-          secureContextMap.delete(servername);
-        }
-        let pendingPromise = secureContexPendingPromiseMap.get(servername);
-        if (pendingPromise) {
-          await pendingPromise;
-          continue;
-        }
-        pendingPromise = createSecureContext(servername);
-        secureContexPendingPromiseMap.set(servername, pendingPromise);
-        await pendingPromise;
-      } while (times-- > 0);
-      throw new Error("多次尝试创建安全上下文失败");
+
+      const cached = secureContextMap.get(servername);
+      if (cached && cached.expiry <= Date.now()) {
+        console.log("证书过期");
+        secureContextMap.delete(servername);
+      }
+      const { value, pending } = secureContextMap.getObj(servername);
+      const result = value !== undefined ? value : await pending;
+
+      if (!result) throw new Error("创建安全上下文失败");
+      callback(null, result.ctx);
     } catch (e: any) {
       console.log("❌ SNICallback失败:", e);
       callback(e);
