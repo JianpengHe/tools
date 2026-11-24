@@ -13,12 +13,10 @@ declare global {
 
 /**
  * "非 Promise" 守卫类型
- * - [__promiseBrand]?: never  → 与 Promise 的 true 冲突，编译期排除 Promise
- * - toString?: unknown        → 避免触发 TS2559 弱类型检查报错（纯可选属性对象需要至少一个已知属性）
+ * 排除 Promise 实例，允许其他任意类型（对象、基础类型、null）
  */
-type NotPromise = {
+type NotPromise = (object | string | number | boolean | symbol | bigint) & {
   readonly [__promiseBrand]?: never;
-  toString?: unknown;
 };
 
 /** 缓存淘汰策略枚举 */
@@ -278,20 +276,99 @@ export class MapPro<K, V extends NotPromise | null> {
   }
 }
 
-// 测试用例
-const mapPro = new MapPro<number, number>({
-  async init(key) {
-    console.log("开始初始化", key);
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    return Math.random();
-  },
-});
-async function getKey(key: number) {
-  // return mapPro.get(key) || (await mapPro.init(key));
-  const { value, pending } = mapPro.getObj(key);
-  return value ?? (await pending);
-}
+// 测试用例 / 使用示例
+// if (typeof require !== "undefined" && require.main === module) {
+//   (async () => {
+//     // 用例 1：异步 init 并发合并去重 (Singleflight)
+//     console.log("=== 用例 1: 异步 init 自动去重与并发合并 (Singleflight) ===");
+//     let initCount = 0;
+//     const asyncMap = new MapPro<number, number>({
+//       async init(key) {
+//         initCount++;
+//         console.log(`[init 触发] 开始为 key=${key} 初始化数据 (耗时 300ms)...`);
+//         await new Promise(resolve => setTimeout(resolve, 300));
+//         return Math.floor(Math.random() * 1000);
+//       },
+//     });
 
-Promise.all([getKey(1), getKey(1), getKey(1)])
-  .then(console.log)
-  .then(() => console.log(mapPro.get(1), mapPro));
+//     // 并发 3 次请求同一个 key
+//     const [res1, res2, res3] = await Promise.all([asyncMap.getAsync(1), asyncMap.getAsync(1), asyncMap.getAsync(1)]);
+//     console.log(`并发读取完成: res1=${res1}, res2=${res2}, res3=${res3}`);
+//     console.log(`init 执行次数 (预期为 1): ${initCount}`);
+
+//     // 用例 2：LRU 策略 (容量限制 + 访问刷新队尾 + 淘汰队首)
+//     console.log("\n=== 用例 2: LRU 策略 (容量淘汰与访问刷新) ===");
+//     const lruMap = new MapPro<string, number>({
+//       evictionPolicy: EMapProEvictionPolicy.LRU,
+//       cacheSize: 2,
+//       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 被淘汰`),
+//     });
+
+//     lruMap.set("a", 1);
+//     lruMap.set("b", 2);
+//     console.log("插入 a=1, b=2，当前 size:", lruMap.size());
+
+//     // 访问 a，使其成为最近使用（移到队尾），此时队首最老的是 b
+//     lruMap.get("a");
+//     console.log("读取 a（刷新 a 为最新使用）");
+
+//     // 插入 c，容量超出，应当淘汰最老未访问的 b
+//     lruMap.set("c", 3);
+//     console.log("插入 c=3，超出 cacheSize=2，触发淘汰");
+//     console.log(
+//       `当前包含: a? ${lruMap.has("a")} (预期 true), b? ${lruMap.has("b")} (预期 false), c? ${lruMap.has("c")} (预期 true)`,
+//     );
+
+//     // 用例 3：FIFO 策略 (先进先出，读取不影响淘汰顺序)
+//     console.log("\n=== 用例 3: FIFO 策略 (先进先出) ===");
+//     const fifoMap = new MapPro<string, number>({
+//       evictionPolicy: EMapProEvictionPolicy.FIFO,
+//       cacheSize: 2,
+//       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 被淘汰`),
+//     });
+
+//     fifoMap.set("k1", 100);
+//     fifoMap.set("k2", 200);
+//     console.log("插入 k1=100, k2=200");
+
+//     // 读取 k1，在 FIFO 下不应改变淘汰顺序（k1 依然是最早插入的队首）
+//     fifoMap.get("k1");
+//     console.log("读取 k1（FIFO 下位置不变）");
+
+//     // 插入 k3，超出容量，淘汰最早的 k1
+//     fifoMap.set("k3", 300);
+//     console.log("插入 k3=300，超出 cacheSize=2，触发淘汰");
+//     console.log(
+//       `当前包含: k1? ${fifoMap.has("k1")} (预期 false), k2? ${fifoMap.has("k2")} (预期 true), k3? ${fifoMap.has("k3")} (预期 true)`,
+//     );
+
+//     // 用例 4：IDLE_TTL 策略 (空闲存活时间与访问续期)
+//     console.log("\n=== 用例 4: IDLE_TTL 策略 (空闲超时与访问续期) ===");
+//     const ttlMap = new MapPro<string, string>({
+//       evictionPolicy: EMapProEvictionPolicy.IDLE_TTL,
+//       cacheTime: 120, // 120ms 空闲超时
+//       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 已超时被清理`),
+//     });
+
+//     ttlMap.set("item1", "val1");
+//     console.log("0ms: 插入 item1 (TTL: 120ms)");
+
+//     await new Promise(r => setTimeout(r, 60));
+//     // 60ms: 读取 item1 进行访问续期（延长至 60 + 120 = 180ms）
+//     ttlMap.get("item1");
+//     ttlMap.set("item2", "val2");
+//     console.log("60ms: 访问 item1 (续期至 180ms)，并插入 item2 (到期 180ms)");
+
+//     await new Promise(r => setTimeout(r, 70));
+//     // 130ms: 距最初插入过去了 130ms，但 item1 续期后未过期，item2 也未过期
+//     console.log(`130ms: item1? ${ttlMap.has("item1")} (预期 true), item2? ${ttlMap.has("item2")} (预期 true)`);
+
+//     await new Promise(r => setTimeout(r, 70));
+//     // 200ms: 距最后访问均超过 120ms，手动触发检查或等待清理
+//     ttlMap.getObj("check"); // 触发淘汰检查
+//     console.log(`200ms: item1? ${ttlMap.has("item1")} (预期 false), item2? ${ttlMap.has("item2")} (预期 false)`);
+//     ttlMap.clear();
+
+//     console.log("\n=== 所有测试用例执行完成 ===");
+//   })();
+// }
