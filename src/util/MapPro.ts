@@ -51,37 +51,43 @@ export type IMapProOptions<K, V> = {
 };
 
 /**
- * 双向链表节点，同时作为 Map 中的值对象
+ * 缓存节点，同时作为 Map 中的值对象
  * - key / value：缓存的键值
  * - pending：异步 init 返回的 Promise（用于去重，同一个 key 只会有一个 pending）
- * - prev / next：双向链表指针，用于维护 FIFO / LRU / IDLE_TTL 的淘汰顺序
  * - timestamp：最后一次访问的时间戳，仅 IDLE_TTL 策略使用
  */
 export type IMapProValue<K, V> = {
   key: K;
   value: V | undefined;
   pending: Promise<V> | undefined;
-  prev: IMapProValue<K, V> | null;
-  next: IMapProValue<K, V> | null;
   timestamp: number;
 };
 
 /**
  * 增强版 Map，支持自动初始化（同步/异步）、多种缓存淘汰策略。
  *
- * 内部结构：HashMap + 双向链表
- * - HashMap 提供 O(1) 查找
- * - 双向链表维护淘汰顺序（头部最新，尾部最旧）
+ * 核心原理：利用 ES6 Map 原生保持“插入顺序（Insertion Order）”的特性实现 O(1) 淘汰队列。
+ *
+ * 设计口诀：
+ * “最新在队尾，最老在队首；淘汰斩队首，见好就收手。”
+ *
+ * 淘汰策略生命周期对照表：
+ * | 淘汰策略 | 创建（新 key） | 读取 / 更新已存在 key | 淘汰起点 | 终止淘汰条件 |
+ * | :--- | :--- | :--- | :--- | :--- |
+ * | NONE | 插入队尾 | 不做任何位移 | 不淘汰 | - |
+ * | FIFO | 插入队尾 | 不做任何位移，保持原顺序 | 队首 | map.size <= cacheSize |
+ * | LRU | 插入队尾 | 移到队尾（标记为最新） | 队首 | map.size <= cacheSize |
+ * | IDLE_TTL | 插入队尾 + 记时间 | 移到队尾 + 刷新时间 | 队首 | 遇到首个 timestamp >= expTime 即 break |
+ *
+ * 优势：
+ * - 纯 ES6 Map 实现，彻底规避双向链表额外的指针对象开销与 GC 压力。
+ * - IDLE_TTL 下元素时间戳自队首到队尾单调递增，过期清理遇到首个未过期节点即可 break，无需全量扫描。
  *
  * 类型约束：V 不能是 undefined，不能是 Promise 实例（可以是 null）
  */
 export class MapPro<K, V extends NotPromise | null> {
-  /** 核心存储：key → 链表节点 */
+  /** 核心存储：key → 节点 */
   private readonly map: Map<K, IMapProValue<K, V>> = new Map();
-  /** 双向链表头节点（最新/最近访问） */
-  private firstNode: IMapProValue<K, V> | null = null;
-  /** 双向链表尾节点（最旧/最久未访问，优先淘汰） */
-  private endNode: IMapProValue<K, V> | null = null;
   /** IDLE_TTL 策略下的定时清理器 */
   private timer: NodeJS.Timeout | null = null;
   private readonly opt: IMapProOptions<K, V>;
@@ -96,43 +102,44 @@ export class MapPro<K, V extends NotPromise | null> {
 
   /**
    * 获取 key 对应的完整节点对象（包含 value、pending 等元信息）
-   * - 如果 key 已存在：根据策略更新访问记录，必要时触发 init
-   * - 如果 key 不存在：创建节点（可传入初始 value），加入链表，触发淘汰检查，必要时触发 init
+   * - 如果 key 已存在：根据策略刷新访问记录（LRU/IDLE_TTL 移到队尾），若传入了 value 则更新，必要时触发 init
+   * - 如果 key 不存在：创建节点（默认放队尾），触发淘汰检查（从队首淘汰），必要时触发 init
    */
   public getObj(key: K, value?: V) {
     const obj = this.map.get(key);
     const evictionPolicy = this.opt.evictionPolicy;
 
     if (obj) {
-      // 已存在的节点：根据策略刷新访问记录
-      if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL) {
-        // IDLE_TTL：刷新时间戳 + 移到链表头部（延长存活）
-        obj.timestamp = Date.now();
-        this.moveNodeToFirst(obj);
-      } else if (evictionPolicy === EMapProEvictionPolicy.LRU) {
-        // LRU：移到链表头部（标记为最近使用）
-        // 注意：FIFO 不移动，保持插入顺序
-        this.moveNodeToFirst(obj);
+      if (value !== undefined) obj.value = value;
+      /**
+       * 将已存在的节点移到队尾标记为最新
+       * - LRU：直接先删后插移到队尾
+       * - IDLE_TTL：刷新时间戳并移到队尾
+       * - FIFO / NONE：保持原位不动
+       */
+      if (evictionPolicy === EMapProEvictionPolicy.LRU || evictionPolicy === EMapProEvictionPolicy.IDLE_TTL) {
+        if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL) obj.timestamp = Date.now();
+        this.map.delete(key);
+        this.map.set(key, obj);
       }
       // 如果 value 还没初始化（比如上次异步 init 失败了），重新尝试
       if (obj.value === undefined && this.opt.init) this.init(key, obj);
       return obj;
     }
 
-    // key 不存在：创建节点
-    const emptyObj: IMapProValue<K, V> = { key, value, pending: undefined, prev: null, next: null, timestamp: 0 };
+    // key 不存在：创建节点（原生 Map 自动追加到队尾）
+    const emptyObj: IMapProValue<K, V> = { key, value, pending: undefined, timestamp: 0 };
+    if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL) emptyObj.timestamp = Date.now();
     this.map.set(key, emptyObj);
 
-    // IDLE_TTL：记录创建时间戳（TTL 从请求时算起）
-    if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL) emptyObj.timestamp = Date.now();
     if (evictionPolicy !== EMapProEvictionPolicy.NONE) {
-      // 新节点插入链表头部，并检查是否需要淘汰旧节点
-      this.moveNodeToFirst(emptyObj);
       this.tryToDeleteNode();
     }
     // IDLE_TTL：首次插入时启动定时清理器
-    if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL && !this.timer && this.opt.cacheTime > 0)
+    if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL && !this.timer && this.opt.cacheTime > 0) {
       this.timer = setInterval(this.timerFn.bind(this), this.opt.cacheTime);
+      this.timer.unref?.();
+    }
     // 如果 value 为 undefined 且有 init 函数，触发自动初始化
     if (emptyObj.value === undefined && this.opt.init) this.init(key, emptyObj);
     return emptyObj;
@@ -151,7 +158,7 @@ export class MapPro<K, V extends NotPromise | null> {
    */
   public async getAsync(key: K, callBack?: (value: V | undefined) => void) {
     const { value, pending } = this.getObj(key);
-    const result = value ?? (await pending);
+    const result = value !== undefined ? value : await pending;
     callBack?.(result);
     return result;
   }
@@ -162,7 +169,7 @@ export class MapPro<K, V extends NotPromise | null> {
    * - 如果 value 已存在，直接返回 value
    * - 否则调用 opt.init 生成值，支持同步和异步
    */
-  public init(key: K, obj = this.getObj(key)) {
+  public init(key: K, obj = this.map.get(key) ?? this.getObj(key)) {
     // 去重：已有 pending 的异步 init，直接复用
     if (obj.pending) return obj.pending;
     // 已有值，无需再初始化
@@ -170,10 +177,10 @@ export class MapPro<K, V extends NotPromise | null> {
 
     const pending = this.opt.init?.(key);
     if (pending instanceof Promise) {
-      // 异步 init：设置 pending，完成后写入 value（需校验节点仍在 map 中）
+      // 异步 init：设置 pending，完成后写入 value（需校验节点仍在 map 中且未被手动 set）
       pending
         .then((value: V) => {
-          if (value !== undefined && this.map.get(key) === obj) obj.value = value;
+          if (value !== undefined && this.map.get(key) === obj && obj.value === undefined) obj.value = value;
         })
         .catch(console.error)
         .finally(() => (obj.pending = undefined));
@@ -185,66 +192,52 @@ export class MapPro<K, V extends NotPromise | null> {
     return obj.value;
   }
 
-  /**
-   * 将节点移到双向链表头部
-   * 链表结构：firstNode ↔ ... ↔ endNode
-   * 头部 = 最新/最近访问，尾部 = 最旧/最久未访问
-   */
-  private moveNodeToFirst(node: IMapProValue<K, V>) {
-    // 已经是头节点，无需移动
-    if (node === this.firstNode) return;
-
-    // 1. 如果是尾节点，先把 endNode 前移
-    if (node === this.endNode) this.endNode = node.prev;
-
-    // 2. 将 node 从原位置断开（修复前后节点的指针）
-    if (node.prev) node.prev.next = node.next;
-    if (node.next) node.next.prev = node.prev;
-
-    // 3. 插入到链表头部
-    node.prev = null;
-    node.next = this.firstNode;
-    if (this.firstNode) this.firstNode.prev = node;
-    this.firstNode = node;
-
-    // 4. 防御性处理：如果原本链表为空，同时设置 endNode
-    if (!this.endNode) this.endNode = node;
+  /** 删除指定 key 的节点并触发 beforeDelete 回调 */
+  public delete(key: K) {
+    const obj = this.map.get(key);
+    if (!obj) return false;
+    this.opt.beforeDelete?.(key, obj.value);
+    this.map.delete(key);
+    // 如果 map 已清空，停止定时器
+    if (this.map.size <= 0 && this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    return true;
   }
 
-  /** 删除链表尾节点（即最旧/最久未访问的节点），同时从 map 中移除 */
-  private deleteEndNode() {
-    if (this.endNode) {
-      this.opt.beforeDelete?.(this.endNode.key, this.endNode.value);
-      this.map.delete(this.endNode.key);
-      // 尾节点前移
-      this.endNode = this.endNode.prev;
-      if (this.endNode) this.endNode.next = null;
-      else this.firstNode = null; // 链表已空
-      if (this.firstNode) this.firstNode.prev = null;
+  /** FIFO / LRU 淘汰：从队首依次弹出最老节点，直到容量合规 */
+  private evictToSize() {
+    while (this.map.size > this.opt.cacheSize) {
+      const entry = this.map.keys().next();
+      if (entry.done) break;
+      this.delete(entry.value);
     }
-    // 如果 map 已清空，停止定时器
-    if (this.map.size <= 0) {
-      if (this.timer) clearInterval(this.timer);
-      this.timer = null;
+  }
+
+  /** IDLE_TTL 淘汰：从队首遍历，遇到首个未过期节点即退出（无需全量扫描） */
+  private cleanExpiredNodes() {
+    if (this.opt.cacheTime <= 0) return;
+    const expTime = Date.now() - this.opt.cacheTime;
+    for (const [key, node] of this.map) {
+      if (node.timestamp < expTime) {
+        this.delete(key);
+      } else {
+        break; // 队首到队尾时间戳单调递增，遇到首个未过期节点可立即停止
+      }
     }
   }
 
   /** 根据淘汰策略尝试删除过期/超量的节点 */
   private tryToDeleteNode() {
-    let node: IMapProValue<K, V> | null;
     switch (this.opt.evictionPolicy) {
       case EMapProEvictionPolicy.NONE:
         return;
       case EMapProEvictionPolicy.FIFO:
       case EMapProEvictionPolicy.LRU:
-        // 超出 cacheSize 时，从尾部开始淘汰
-        while (this.map.size > this.opt.cacheSize) this.deleteEndNode();
-        return;
+        return this.evictToSize();
       case EMapProEvictionPolicy.IDLE_TTL:
-        // 淘汰所有超过 cacheTime 未被访问的节点
-        const expTime = Date.now() - this.opt.cacheTime;
-        while ((node = this.endNode) && node.timestamp < expTime) this.deleteEndNode();
-        return;
+        return this.cleanExpiredNodes();
     }
   }
 
@@ -257,9 +250,7 @@ export class MapPro<K, V extends NotPromise | null> {
       this.timer = null;
       return;
     }
-    const expTime = Date.now() - cacheTime;
-    let node: IMapProValue<K, V> | null;
-    while ((node = this.endNode) && node.timestamp < expTime) this.deleteEndNode();
+    this.cleanExpiredNodes();
   }
 
   /** 返回当前缓存的条目数 */
@@ -267,11 +258,9 @@ export class MapPro<K, V extends NotPromise | null> {
     return this.map.size;
   }
 
-  /** 清空所有缓存，重置链表和定时器 */
+  /** 清空所有缓存，重置定时器 */
   public clear() {
     this.map.clear();
-    this.firstNode = null;
-    this.endNode = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     return this;
@@ -282,7 +271,7 @@ export class MapPro<K, V extends NotPromise | null> {
     return this.map.has(key);
   }
 
-  /** 手动设置 key-value，内部通过 getObj 维护链表和淘汰 */
+  /** 手动设置 key-value，内部通过 getObj 维护淘汰 */
   public set(key: K, value: V) {
     this.getObj(key, value);
     return this;
