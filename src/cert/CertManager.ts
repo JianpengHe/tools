@@ -183,8 +183,7 @@ export function createSNICallback(
         console.log("证书过期");
         secureContextMap.delete(servername);
       }
-      const { value, pending } = secureContextMap.getObj(servername);
-      const result = value !== undefined ? value : await pending;
+      const result = secureContextMap.get(servername) ?? (await secureContextMap.getPending(servername));
 
       if (!result) throw new Error("创建安全上下文失败");
       callback(null, result.ctx);

@@ -12,6 +12,7 @@ import * as net from "net";
 import * as os from "os";
 import * as child_process from "child_process";
 import { Buf } from "../byte/Buf";
+import { EMapProEvictionPolicy, MapPro } from "../util/MapPro";
 import { getOccupiedNetworkPortPids, setDnsAddr } from "../util/systemNetworkSettings";
 
 /**
@@ -297,7 +298,9 @@ export class DnsServer {
           let parts: string[];
           if (dIdx !== -1) {
             const left = RDATA.slice(0, dIdx).split(":").filter(Boolean);
-            const right = RDATA.slice(dIdx + 2).split(":").filter(Boolean);
+            const right = RDATA.slice(dIdx + 2)
+              .split(":")
+              .filter(Boolean);
             parts = [...left, ...Array(8 - (left.length + right.length)).fill("0"), ...right];
           } else {
             parts = RDATA.split(":");
@@ -713,18 +716,16 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
   const minTtl = opt.minTtl ?? 5;
   const maxTtl = opt.maxTtl ?? 600;
 
-  // 内存缓存: key 为 "hostname:family"，value 为解析结果与过期时间
-  const cache = new Map<string, { address: string; family: 4 | 6; expires: number }>();
-  // 并发请求防击穿 Map
-  const pendingMap = new Map<string, Promise<{ address: string; family: 4 | 6 }>>();
-
-  const resolveHost = async (hostname: string, family: number): Promise<{ address: string; family: 4 | 6 }> => {
+  const resolveHost = async (cacheKey: string): Promise<{ address: string; family: 4 | 6; expires: number }> => {
+    const sep = cacheKey.lastIndexOf(":");
+    const hostname = cacheKey.slice(0, sep);
+    const family = Number(cacheKey.slice(sep + 1));
     const queryTypes: EDnsResolveType[] =
       family === 6
         ? [EDnsResolveType.AAAA]
         : family === 4
-        ? [EDnsResolveType.A]
-        : [EDnsResolveType.A, EDnsResolveType.AAAA];
+          ? [EDnsResolveType.A]
+          : [EDnsResolveType.A, EDnsResolveType.AAAA];
 
     for (const qtype of queryTypes) {
       try {
@@ -737,10 +738,8 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
         if (answer?.RDATA) {
           const isV6 = answer.TYPE === EDnsResolveType.AAAA;
           const resolvedFamily: 4 | 6 = isV6 ? 6 : 4;
-          const ttl = Math.min(Math.max(answer.TTL || 60, minTtl), maxTtl);
-          const entry = { address: answer.RDATA, family: resolvedFamily, expires: Date.now() + ttl * 1000 };
-          cache.set(`${hostname}:${family}`, entry);
-          return entry;
+          const ttl = Math.min(Math.max(answer.TTL ?? 60, minTtl), maxTtl);
+          return { address: answer.RDATA, family: resolvedFamily, expires: Date.now() + ttl * 1000 };
         }
       } catch {
         // 尝试下一个记录类型
@@ -751,6 +750,13 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
     err.code = "ENOTFOUND";
     throw err;
   };
+
+  // 内存缓存: key 为 "hostname:family"，支持 LRU 淘汰与并发防击穿 (Singleflight)
+  const cache = new MapPro<string, { address: string; family: 4 | 6; expires: number }>({
+    evictionPolicy: EMapProEvictionPolicy.LRU,
+    cacheSize: 1000,
+    init: resolveHost,
+  });
 
   const lookup = (
     hostname: string,
@@ -789,25 +795,21 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
       return cb(null, all ? [{ address: addr, family: fam }] : addr, fam);
     }
 
+    const done = (res: { address: string; family: 4 | 6 }) =>
+      cb(null, all ? [{ address: res.address, family: res.family }] : res.address, res.family);
+
     const cacheKey = `${hostname}:${family}`;
     const cached = cache.get(cacheKey);
-    if (cached && Date.now() < cached.expires) {
-      return cb(null, all ? [{ address: cached.address, family: cached.family }] : cached.address, cached.family);
+
+    if (cached) {
+      if (Date.now() < cached.expires) return done(cached);
+      cache.delete(cacheKey);
     }
 
-    let promise = pendingMap.get(cacheKey);
-    if (!promise) {
-      promise = resolveHost(hostname, family);
-      pendingMap.set(cacheKey, promise);
-      promise.finally(() => pendingMap.delete(cacheKey));
-    }
-
-    promise.then(
-      res => {
-        cb(null, all ? [{ address: res.address, family: res.family }] : res.address, res.family);
-      },
-      err => cb(err),
-    );
+    cache.getAsync(cacheKey, (err, res) => {
+      if (err) return cb(err as NodeJS.ErrnoException);
+      if (res) done(res);
+    });
   };
 
   return lookup;
