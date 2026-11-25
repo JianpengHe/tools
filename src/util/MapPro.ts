@@ -133,10 +133,9 @@ export class MapPro<K, V extends NotPromise | null> {
     if (evictionPolicy !== EMapProEvictionPolicy.NONE) {
       this.tryToDeleteNode();
     }
-    // IDLE_TTL：首次插入时启动定时清理器
+    // IDLE_TTL：首次插入时启动懒重排定时器
     if (evictionPolicy === EMapProEvictionPolicy.IDLE_TTL && !this.timer && this.opt.cacheTime > 0) {
-      this.timer = setInterval(this.timerFn.bind(this), this.opt.cacheTime);
-      this.timer.unref?.();
+      this.scheduleTimer(this.opt.cacheTime);
     }
     // 如果 value 为 undefined 且有 init 函数，触发自动初始化
     if (emptyObj.value === undefined && this.opt.init) this.init(key, emptyObj);
@@ -198,7 +197,7 @@ export class MapPro<K, V extends NotPromise | null> {
     this.map.delete(key);
     // 如果 map 已清空，停止定时器
     if (this.map.size <= 0 && this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
     return true;
@@ -239,16 +238,27 @@ export class MapPro<K, V extends NotPromise | null> {
     }
   }
 
-  /** IDLE_TTL 定时器回调：定期清理过期节点，map 清空时自动停止定时器 */
+  /** 启动单次过期清理定时器 */
+  private scheduleTimer(delay: number) {
+    this.timer = setTimeout(() => this.timerFn(), delay);
+    this.timer.unref?.();
+  }
+
+  /** IDLE_TTL 定时器回调：清理过期节点，若仍有未过期节点则按队首剩余时间自动续期 */
   private timerFn() {
+    this.timer = null;
     const { cacheTime, evictionPolicy } = this.opt;
-    // 安全检查：策略不对或已无数据时，停止定时器
-    if (cacheTime === 0 || this.map.size <= 0 || evictionPolicy !== EMapProEvictionPolicy.IDLE_TTL) {
-      if (this.timer) clearInterval(this.timer);
-      this.timer = null;
+    // 安全检查：策略不对或已无数据时，停止续期
+    if (cacheTime <= 0 || this.map.size <= 0 || evictionPolicy !== EMapProEvictionPolicy.IDLE_TTL) {
       return;
     }
     this.cleanExpiredNodes();
+    const firstNode = this.map.values().next().value;
+    if (firstNode) {
+      // +1 确保下次唤醒时满足严格小于 expTime，避免边界 0ms 空转一次
+      const delay = Math.max(1, firstNode.timestamp + cacheTime - Date.now() + 1);
+      this.scheduleTimer(delay);
+    }
   }
 
   /** 返回当前缓存的条目数 */
@@ -259,7 +269,7 @@ export class MapPro<K, V extends NotPromise | null> {
   /** 清空所有缓存，重置定时器 */
   public clear() {
     this.map.clear();
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     return this;
   }
@@ -278,97 +288,176 @@ export class MapPro<K, V extends NotPromise | null> {
 
 // 测试用例 / 使用示例
 // if (typeof require !== "undefined" && require.main === module) {
-//   (async () => {
-//     // 用例 1：异步 init 并发合并去重 (Singleflight)
-//     console.log("=== 用例 1: 异步 init 自动去重与并发合并 (Singleflight) ===");
-//     let initCount = 0;
-//     const asyncMap = new MapPro<number, number>({
-//       async init(key) {
-//         initCount++;
-//         console.log(`[init 触发] 开始为 key=${key} 初始化数据 (耗时 300ms)...`);
-//         await new Promise(resolve => setTimeout(resolve, 300));
-//         return Math.floor(Math.random() * 1000);
-//       },
-//     });
+(async () => {
+  //     // 用例 1：异步 init 并发合并去重 (Singleflight)
+  //     console.log("=== 用例 1: 异步 init 自动去重与并发合并 (Singleflight) ===");
+  //     let initCount = 0;
+  //     const asyncMap = new MapPro<number, number>({
+  //       async init(key) {
+  //         initCount++;
+  //         console.log(`[init 触发] 开始为 key=${key} 初始化数据 (耗时 300ms)...`);
+  //         await new Promise(resolve => setTimeout(resolve, 300));
+  //         return Math.floor(Math.random() * 1000);
+  //       },
+  //     });
 
-//     // 并发 3 次请求同一个 key
-//     const [res1, res2, res3] = await Promise.all([asyncMap.getAsync(1), asyncMap.getAsync(1), asyncMap.getAsync(1)]);
-//     console.log(`并发读取完成: res1=${res1}, res2=${res2}, res3=${res3}`);
-//     console.log(`init 执行次数 (预期为 1): ${initCount}`);
+  //     // 并发 3 次请求同一个 key
+  //     const [res1, res2, res3] = await Promise.all([asyncMap.getAsync(1), asyncMap.getAsync(1), asyncMap.getAsync(1)]);
+  //     console.log(`并发读取完成: res1=${res1}, res2=${res2}, res3=${res3}`);
+  //     console.log(`init 执行次数 (预期为 1): ${initCount}`);
 
-//     // 用例 2：LRU 策略 (容量限制 + 访问刷新队尾 + 淘汰队首)
-//     console.log("\n=== 用例 2: LRU 策略 (容量淘汰与访问刷新) ===");
-//     const lruMap = new MapPro<string, number>({
-//       evictionPolicy: EMapProEvictionPolicy.LRU,
-//       cacheSize: 2,
-//       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 被淘汰`),
-//     });
+  //     // 用例 2：LRU 策略 (容量限制 + 访问刷新队尾 + 淘汰队首)
+  //     console.log("\n=== 用例 2: LRU 策略 (容量淘汰与访问刷新) ===");
+  //     const lruMap = new MapPro<string, number>({
+  //       evictionPolicy: EMapProEvictionPolicy.LRU,
+  //       cacheSize: 2,
+  //       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 被淘汰`),
+  //     });
 
-//     lruMap.set("a", 1);
-//     lruMap.set("b", 2);
-//     console.log("插入 a=1, b=2，当前 size:", lruMap.size());
+  //     lruMap.set("a", 1);
+  //     lruMap.set("b", 2);
+  //     console.log("插入 a=1, b=2，当前 size:", lruMap.size());
 
-//     // 访问 a，使其成为最近使用（移到队尾），此时队首最老的是 b
-//     lruMap.get("a");
-//     console.log("读取 a（刷新 a 为最新使用）");
+  //     // 访问 a，使其成为最近使用（移到队尾），此时队首最老的是 b
+  //     lruMap.get("a");
+  //     console.log("读取 a（刷新 a 为最新使用）");
 
-//     // 插入 c，容量超出，应当淘汰最老未访问的 b
-//     lruMap.set("c", 3);
-//     console.log("插入 c=3，超出 cacheSize=2，触发淘汰");
-//     console.log(
-//       `当前包含: a? ${lruMap.has("a")} (预期 true), b? ${lruMap.has("b")} (预期 false), c? ${lruMap.has("c")} (预期 true)`,
-//     );
+  //     // 插入 c，容量超出，应当淘汰最老未访问的 b
+  //     lruMap.set("c", 3);
+  //     console.log("插入 c=3，超出 cacheSize=2，触发淘汰");
+  //     console.log(
+  //       `当前包含: a? ${lruMap.has("a")} (预期 true), b? ${lruMap.has("b")} (预期 false), c? ${lruMap.has("c")} (预期 true)`,
+  //     );
 
-//     // 用例 3：FIFO 策略 (先进先出，读取不影响淘汰顺序)
-//     console.log("\n=== 用例 3: FIFO 策略 (先进先出) ===");
-//     const fifoMap = new MapPro<string, number>({
-//       evictionPolicy: EMapProEvictionPolicy.FIFO,
-//       cacheSize: 2,
-//       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 被淘汰`),
-//     });
+  //     // 用例 3：FIFO 策略 (先进先出，读取不影响淘汰顺序)
+  //     console.log("\n=== 用例 3: FIFO 策略 (先进先出) ===");
+  //     const fifoMap = new MapPro<string, number>({
+  //       evictionPolicy: EMapProEvictionPolicy.FIFO,
+  //       cacheSize: 2,
+  //       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 被淘汰`),
+  //     });
 
-//     fifoMap.set("k1", 100);
-//     fifoMap.set("k2", 200);
-//     console.log("插入 k1=100, k2=200");
+  //     fifoMap.set("k1", 100);
+  //     fifoMap.set("k2", 200);
+  //     console.log("插入 k1=100, k2=200");
 
-//     // 读取 k1，在 FIFO 下不应改变淘汰顺序（k1 依然是最早插入的队首）
-//     fifoMap.get("k1");
-//     console.log("读取 k1（FIFO 下位置不变）");
+  //     // 读取 k1，在 FIFO 下不应改变淘汰顺序（k1 依然是最早插入的队首）
+  //     fifoMap.get("k1");
+  //     console.log("读取 k1（FIFO 下位置不变）");
 
-//     // 插入 k3，超出容量，淘汰最早的 k1
-//     fifoMap.set("k3", 300);
-//     console.log("插入 k3=300，超出 cacheSize=2，触发淘汰");
-//     console.log(
-//       `当前包含: k1? ${fifoMap.has("k1")} (预期 false), k2? ${fifoMap.has("k2")} (预期 true), k3? ${fifoMap.has("k3")} (预期 true)`,
-//     );
+  //     // 插入 k3，超出容量，淘汰最早的 k1
+  //     fifoMap.set("k3", 300);
+  //     console.log("插入 k3=300，超出 cacheSize=2，触发淘汰");
+  //     console.log(
+  //       `当前包含: k1? ${fifoMap.has("k1")} (预期 false), k2? ${fifoMap.has("k2")} (预期 true), k3? ${fifoMap.has("k3")} (预期 true)`,
+  //     );
 
-//     // 用例 4：IDLE_TTL 策略 (空闲存活时间与访问续期)
-//     console.log("\n=== 用例 4: IDLE_TTL 策略 (空闲超时与访问续期) ===");
-//     const ttlMap = new MapPro<string, string>({
-//       evictionPolicy: EMapProEvictionPolicy.IDLE_TTL,
-//       cacheTime: 120, // 120ms 空闲超时
-//       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 已超时被清理`),
-//     });
+  //     // 用例 4：IDLE_TTL 策略 (空闲存活时间与访问续期)
+  //     console.log("\n=== 用例 4: IDLE_TTL 策略 (空闲超时与访问续期) ===");
+  //     const ttlMap = new MapPro<string, string>({
+  //       evictionPolicy: EMapProEvictionPolicy.IDLE_TTL,
+  //       cacheTime: 120, // 120ms 空闲超时
+  //       beforeDelete: (k, v) => console.log(`[beforeDelete 回调] key=${k}, value=${v} 已超时被清理`),
+  //     });
 
-//     ttlMap.set("item1", "val1");
-//     console.log("0ms: 插入 item1 (TTL: 120ms)");
+  //     ttlMap.set("item1", "val1");
+  //     console.log("0ms: 插入 item1 (TTL: 120ms)");
 
-//     await new Promise(r => setTimeout(r, 60));
-//     // 60ms: 读取 item1 进行访问续期（延长至 60 + 120 = 180ms）
-//     ttlMap.get("item1");
-//     ttlMap.set("item2", "val2");
-//     console.log("60ms: 访问 item1 (续期至 180ms)，并插入 item2 (到期 180ms)");
+  //     await new Promise(r => setTimeout(r, 60));
+  //     // 60ms: 读取 item1 进行访问续期（延长至 60 + 120 = 180ms）
+  //     ttlMap.get("item1");
+  //     ttlMap.set("item2", "val2");
+  //     console.log("60ms: 访问 item1 (续期至 180ms)，并插入 item2 (到期 180ms)");
 
-//     await new Promise(r => setTimeout(r, 70));
-//     // 130ms: 距最初插入过去了 130ms，但 item1 续期后未过期，item2 也未过期
-//     console.log(`130ms: item1? ${ttlMap.has("item1")} (预期 true), item2? ${ttlMap.has("item2")} (预期 true)`);
+  //     await new Promise(r => setTimeout(r, 70));
+  //     // 130ms: 距最初插入过去了 130ms，但 item1 续期后未过期，item2 也未过期
+  //     console.log(`130ms: item1? ${ttlMap.has("item1")} (预期 true), item2? ${ttlMap.has("item2")} (预期 true)`);
 
-//     await new Promise(r => setTimeout(r, 70));
-//     // 200ms: 距最后访问均超过 120ms，手动触发检查或等待清理
-//     ttlMap.getObj("check"); // 触发淘汰检查
-//     console.log(`200ms: item1? ${ttlMap.has("item1")} (预期 false), item2? ${ttlMap.has("item2")} (预期 false)`);
-//     ttlMap.clear();
+  //     await new Promise(r => setTimeout(r, 70));
+  //     // 200ms: 距最后访问均超过 120ms，手动触发检查或等待清理
+  //     ttlMap.getObj("check"); // 触发淘汰检查
+  //     console.log(`200ms: item1? ${ttlMap.has("item1")} (预期 false), item2? ${ttlMap.has("item2")} (预期 false)`);
+  //     ttlMap.clear();
 
-//     console.log("\n=== 所有测试用例执行完成 ===");
-//   })();
+  //     // 用例 5：4种淘汰策略压测（大量写入与淘汰下的耗时及内存统计汇总）
+  //     // 运行提示：可使用 `node --expose-gc` 运行以获得更准确的堆内存增量统计
+  console.log("\n=== 用例 5: 4种淘汰策略压测（写入 & 淘汰性能与内存汇总） ===");
+  const TOTAL_OPS = 2000_000;
+  const CACHE_SIZE = 10_000;
+  const IDLE_CACHE_TIME = 10; // 1ms 空闲超时，确保压测期间能自然触发批量过期淘汰
+  const SAMPLE_STEP = 10_000;
+
+  type BenchRow = {
+    策略: string;
+    写入次数: number;
+    淘汰次数: number;
+    最终容量: number;
+    "耗时(ms)": number;
+    "吞吐(ops/s)": number;
+    "堆增量(MB)": number;
+    "峰值堆增量(MB)": number;
+  };
+
+  const benchConfigs: Array<{ name: string; policy: EMapProEvictionPolicy; cacheSize?: number; cacheTime?: number }> = [
+    { name: "NONE", policy: EMapProEvictionPolicy.NONE },
+    { name: "FIFO", policy: EMapProEvictionPolicy.FIFO, cacheSize: CACHE_SIZE },
+    { name: "LRU", policy: EMapProEvictionPolicy.LRU, cacheSize: CACHE_SIZE },
+    { name: "IDLE_TTL", policy: EMapProEvictionPolicy.IDLE_TTL, cacheTime: IDLE_CACHE_TIME },
+  ];
+
+  const toMB = (bytes: number) => Number((bytes / 1024 / 1024).toFixed(2));
+  const benchSummary: BenchRow[] = [];
+
+  for (const cfg of benchConfigs) {
+    // 尽量在每轮测试前回收上一轮垃圾，减少跨用例内存干扰
+    (globalThis as { gc?: () => void }).gc?.();
+    await new Promise(r => setTimeout(r, 20));
+
+    let evictedCount = 0;
+    const map = new MapPro<number, string>({
+      evictionPolicy: cfg.policy,
+      cacheSize: cfg.cacheSize ?? Infinity,
+      cacheTime: cfg.cacheTime ?? 0,
+      beforeDelete: () => {
+        evictedCount++;
+      },
+    });
+
+    const baseHeap = process.memoryUsage().heapUsed;
+    let peakHeap = baseHeap;
+    const start = performance.now();
+
+    for (let i = 0; i < TOTAL_OPS; i++) {
+      // 构造一定比例的重复 key（仅在 LRU/IDLE_TTL 下会触发队尾移动）与新 key 写入
+      const key = i % 5 === 0 ? i % CACHE_SIZE : i;
+      map.set(key, `val_${i}`);
+
+      if (i % SAMPLE_STEP === 0) {
+        const curHeap = process.memoryUsage().heapUsed;
+        if (curHeap > peakHeap) peakHeap = curHeap;
+      }
+    }
+
+    const durationMs = performance.now() - start;
+    const endHeap = process.memoryUsage().heapUsed;
+    if (endHeap > peakHeap) peakHeap = endHeap;
+
+    benchSummary.push({
+      策略: cfg.name,
+      写入次数: TOTAL_OPS,
+      淘汰次数: evictedCount,
+      最终容量: map.size(),
+      "耗时(ms)": Number(durationMs.toFixed(2)),
+      "吞吐(ops/s)": Math.round(TOTAL_OPS / (durationMs / 1000)),
+      "堆增量(MB)": toMB(endHeap - baseHeap),
+      "峰值堆增量(MB)": toMB(peakHeap - baseHeap),
+    });
+
+    map.clear();
+  }
+
+  console.table(benchSummary);
+
+  console.log("\n=== 所有测试用例执行完成 ===");
+})();
 // }
