@@ -11,10 +11,10 @@ type NotPromise<V> =
 const enum PolicyFlag {
   /** 按 cacheSize 淘汰（FIFO / LRU） */
   按容量淘汰 = 1 << 0,
-  /** 访问或更新时移到队尾（LRU / IDLE_TTL） */
+  /** 访问时移到队尾并续期（LRU / IDLE_TTL） */
   命中移到队尾 = 1 << 1,
-  /** 启用空闲时间淘汰与时间戳记录（IDLE_TTL） */
-  空闲过期 = 1 << 2,
+  /** 启用过期淘汰与时间戳记录（TTL / IDLE_TTL） */
+  过期淘汰 = 1 << 2,
 }
 
 /** 缓存淘汰策略枚举（支持按位组合） */
@@ -25,8 +25,10 @@ export enum EMapProEvictionPolicy {
   FIFO = PolicyFlag.按容量淘汰,
   /** 最近最少使用：最久没被访问的最先被淘汰 */
   LRU = PolicyFlag.按容量淘汰 | PolicyFlag.命中移到队尾,
-  /** 空闲存活时间：超过 cacheTime 未被访问的会被定时器清除 */
-  IDLE_TTL = PolicyFlag.空闲过期 | PolicyFlag.命中移到队尾,
+  /** 绝对存活时间：自写入/更新起超过 cacheTime 后过期，读取不续期 */
+  TTL = PolicyFlag.过期淘汰,
+  /** 空闲存活时间：超过 cacheTime 未被访问的会被清除，读取会续期 */
+  IDLE_TTL = PolicyFlag.过期淘汰 | PolicyFlag.命中移到队尾,
 }
 
 type IMapProBaseOptions<K, V> = {
@@ -53,11 +55,11 @@ export type IMapProOptions<K, V> = IMapProBaseOptions<K, V> &
         cacheSize?: number;
       }
     | {
-        /** 缓存淘汰策略：IDLE_TTL */
-        readonly evictionPolicy: EMapProEvictionPolicy.IDLE_TTL;
-        /** 缓存空闲存活时间（毫秒），仅在 IDLE_TTL 策略下生效（默认 Infinity，即永不过期） */
+        /** 缓存淘汰策略：TTL / IDLE_TTL */
+        readonly evictionPolicy: EMapProEvictionPolicy.TTL | EMapProEvictionPolicy.IDLE_TTL;
+        /** 缓存存活时间（毫秒），仅在 TTL / IDLE_TTL 策略下生效（默认 Infinity，即永不过期） */
         cacheTime?: number;
-        /** 是否启用 IDLE_TTL 后台定时清理器（默认 false，仅在 get/set 时被动清理过期节点） */
+        /** 是否启用后台定时清理器（默认 false，仅在 get/has/init/set 时被动清理过期节点） */
         enableTimer?: boolean;
       }
   );
@@ -137,7 +139,7 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
    */
   public override get(key: K): V | undefined {
     const evictionPolicy = this.opt.evictionPolicy;
-    const hasIdleTtl = (evictionPolicy & PolicyFlag.空闲过期) !== 0 && Number.isFinite(this.opt.cacheTime);
+    const hasTtl = (evictionPolicy & PolicyFlag.过期淘汰) !== 0 && Number.isFinite(this.opt.cacheTime);
     let now: number | undefined;
     if (this.nextExpireTime !== Infinity) {
       now = Date.now();
@@ -149,8 +151,8 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
       if (evictionPolicy & PolicyFlag.命中移到队尾) {
         super.delete(key);
         super.set(key, value);
+        if (hasTtl) this.metaMap.set(key, now ?? Date.now());
       }
-      if (hasIdleTtl) this.metaMap.set(key, now ?? Date.now());
 
       return value;
     }
@@ -237,23 +239,23 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
       return this;
     }
 
-    if (!(evictionPolicy & PolicyFlag.命中移到队尾)) {
+    if (!(evictionPolicy & (PolicyFlag.命中移到队尾 | PolicyFlag.过期淘汰))) {
       // 仅按容量淘汰（如 FIFO）：原地覆盖不移位，省去 delete
       super.set(key, value);
       this.evictToSize();
       return this;
     }
 
-    const hasIdleTtl = (evictionPolicy & PolicyFlag.空闲过期) !== 0 && Number.isFinite(this.opt.cacheTime);
-    const now = hasIdleTtl ? Date.now() : 0;
+    const hasTtl = (evictionPolicy & PolicyFlag.过期淘汰) !== 0 && Number.isFinite(this.opt.cacheTime);
+    const now = hasTtl ? Date.now() : 0;
     // 先清理过期节点（若当前 key 已过期会先触发 beforeDelete），未过期则按普通覆盖处理不触发 beforeDelete
-    if (hasIdleTtl) this.clean(now);
+    if (hasTtl) this.clean(now);
 
-    // 需移到队尾的策略（LRU / IDLE_TTL）：直接 delete + set 省去 has 查询
+    // 需移到队尾的策略（LRU / TTL / IDLE_TTL）：直接 delete + set 省去 has 查询
     const existed = super.delete(key);
     super.set(key, value);
 
-    if (hasIdleTtl) {
+    if (hasTtl) {
       this.metaMap.set(key, now);
       // 仅在无更早节点时初始化下界；队首被刷新/删除时保持下界不变，下次到期检查时会自动校准
       if (this.nextExpireTime === Infinity) this.nextExpireTime = now + this.opt.cacheTime;
