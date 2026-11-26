@@ -29,23 +29,44 @@ export enum EMapProEvictionPolicy {
   IDLE_TTL = PolicyFlag.空闲过期 | PolicyFlag.命中移到队尾,
 }
 
-/** MapPro 配置项 */
-export type IMapProOptions<K, V> = {
+type IMapProBaseOptions<K, V> = {
   /**
    * 自动初始化函数：调用 get/getAsync 时，若 key 对应的 value 为 undefined，
    * 会调用此函数生成初始值并缓存。支持同步和异步返回。
    */
   init?: (key: K) => V | Promise<V>;
-  /** 缓存淘汰策略 */
-  readonly evictionPolicy: EMapProEvictionPolicy;
-  /** 缓存最大数量，仅在 FIFO / LRU 策略下生效（默认 Infinity，即不限制） */
-  cacheSize: number;
-  /** 缓存空闲存活时间（毫秒），仅在 IDLE_TTL 策略下生效（默认 Infinity，即永不过期） */
-  cacheTime: number;
   /** 节点被淘汰前的回调，可用于资源清理等 */
   beforeDelete?: (key: K, value: V) => void;
-  /** 是否启用 IDLE_TTL 后台定时清理器（默认 false，仅在 get/set 时被动清理过期节点） */
-  enableTimer?: boolean;
+};
+
+/** MapPro 配置项（基于 evictionPolicy 的判别联合类型） */
+export type IMapProOptions<K, V> = IMapProBaseOptions<K, V> &
+  (
+    | {
+        /** 缓存淘汰策略：不淘汰（默认） */
+        readonly evictionPolicy?: EMapProEvictionPolicy.NONE;
+      }
+    | {
+        /** 缓存淘汰策略：FIFO / LRU */
+        readonly evictionPolicy: EMapProEvictionPolicy.FIFO | EMapProEvictionPolicy.LRU;
+        /** 缓存最大数量，仅在 FIFO / LRU 策略下生效（默认 Infinity，即不限制） */
+        cacheSize?: number;
+      }
+    | {
+        /** 缓存淘汰策略：IDLE_TTL */
+        readonly evictionPolicy: EMapProEvictionPolicy.IDLE_TTL;
+        /** 缓存空闲存活时间（毫秒），仅在 IDLE_TTL 策略下生效（默认 Infinity，即永不过期） */
+        cacheTime?: number;
+        /** 是否启用 IDLE_TTL 后台定时清理器（默认 false，仅在 get/set 时被动清理过期节点） */
+        enableTimer?: boolean;
+      }
+  );
+
+type IMapProInternalOptions<K, V> = IMapProBaseOptions<K, V> & {
+  readonly evictionPolicy: EMapProEvictionPolicy;
+  cacheSize: number;
+  cacheTime: number;
+  enableTimer: boolean;
 };
 
 /**
@@ -84,9 +105,9 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
   private timer: NodeJS.Timeout | null = null;
   /** IDLE_TTL 策略下队首节点的最早到期时间戳（用于 O(1) 跳过无效清理） */
   private nextExpireTime = Infinity;
-  private readonly opt: IMapProOptions<K, V>;
+  private readonly opt: IMapProInternalOptions<K, V>;
 
-  constructor(opt: Partial<IMapProOptions<K, V>> = {}) {
+  constructor(opt: IMapProOptions<K, V> = {}) {
     super();
     this.opt = {
       cacheSize: Infinity,
