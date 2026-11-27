@@ -22,7 +22,7 @@ import * as tls from "tls";
 import * as http from "http";
 import { ASN1Encoder } from "./ASN1Encoder";
 import { CertGenerator } from "./CertGenerator";
-import { MapPro, EMapProEvictionPolicy } from "../util/MapPro";
+import { MapProCustomTtl } from "../util/MapProCustomTtl";
 
 /**
  * 异步读取指定文件为 Buffer
@@ -142,10 +142,9 @@ export function createSNICallback(
    * - LRU 淘汰：达到 maxHostCount 时自动淘汰最久未访问的上下文
    * - 自动 Singleflight：同一域名的并发请求自动去重，避免重复签发
    */
-  const secureContextMap = new MapPro<string, { ctx: tls.SecureContext; expiry: number }>({
-    evictionPolicy: EMapProEvictionPolicy.LRU,
+  const secureContextMap = new MapProCustomTtl<string, tls.SecureContext>({
     cacheSize: maxHostCount,
-    init: async servername => {
+    init: async (servername, setTtl) => {
       console.log("createSecureContext", servername);
       const certPath = path.resolve(certDiskPath, servername + ".crt");
       const keyPath = path.resolve(certDiskPath, servername + ".key");
@@ -160,11 +159,12 @@ export function createSNICallback(
           await Promise.all([fs.promises.writeFile(certPath, pem.cert), fs.promises.writeFile(keyPath, pem.key)]);
       }
 
-      const ctx = tls.createSecureContext({
+      // 证书到期自动淘汰，最小有效期 10 秒
+      setTtl(Math.max(pem.expiry - Date.now(), 10_000));
+      return tls.createSecureContext({
         key: pem.key,
         cert: pem.cert,
       });
-      return { ctx, expiry: pem.expiry };
     },
   });
 
@@ -178,15 +178,9 @@ export function createSNICallback(
       if (servername === "") throw new Error("servername is empty");
       if (/[\\/:*?"<>|]/.test(servername)) throw new Error("servername contain invalid char");
 
-      const cached = secureContextMap.get(servername);
-      if (cached && cached.expiry <= Date.now()) {
-        console.log("证书过期");
-        secureContextMap.delete(servername);
-      }
-      const result = secureContextMap.get(servername) ?? (await secureContextMap.getPending(servername));
-
-      if (!result) throw new Error("创建安全上下文失败");
-      callback(null, result.ctx);
+      const ctx = await secureContextMap.getAsync(servername);
+      if (!ctx) throw new Error("创建安全上下文失败");
+      callback(null, ctx);
     } catch (e: any) {
       console.log("❌ SNICallback失败:", e);
       callback(e);

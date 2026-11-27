@@ -12,7 +12,7 @@ import * as net from "net";
 import * as os from "os";
 import * as child_process from "child_process";
 import { Buf } from "../byte/Buf";
-import { EMapProEvictionPolicy, MapPro } from "../util/MapPro";
+import { MapProCustomTtl } from "../util/MapProCustomTtl";
 import { getOccupiedNetworkPortPids, setDnsAddr } from "../util/systemNetworkSettings";
 
 /**
@@ -716,7 +716,7 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
   const minTtl = opt.minTtl ?? 5;
   const maxTtl = opt.maxTtl ?? 600;
 
-  const resolveHost = async (cacheKey: string): Promise<{ address: string; family: 4 | 6; expires: number }> => {
+  const resolveHost = async (cacheKey: string, setTtl: (ttlMs: number) => void): Promise<string> => {
     const sep = cacheKey.lastIndexOf(":");
     const hostname = cacheKey.slice(0, sep);
     const family = Number(cacheKey.slice(sep + 1));
@@ -736,10 +736,9 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
         );
         const answer = answers.find(({ TYPE, CLASS }) => CLASS === 1 && TYPE === qtype);
         if (answer?.RDATA) {
-          const isV6 = answer.TYPE === EDnsResolveType.AAAA;
-          const resolvedFamily: 4 | 6 = isV6 ? 6 : 4;
           const ttl = Math.min(Math.max(answer.TTL ?? 60, minTtl), maxTtl);
-          return { address: answer.RDATA, family: resolvedFamily, expires: Date.now() + ttl * 1000 };
+          setTtl(ttl * 1000);
+          return answer.RDATA;
         }
       } catch {
         // 尝试下一个记录类型
@@ -752,8 +751,7 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
   };
 
   // 内存缓存: key 为 "hostname:family"，支持 LRU 淘汰与并发防击穿 (Singleflight)
-  const cache = new MapPro<string, { address: string; family: 4 | 6; expires: number }>({
-    evictionPolicy: EMapProEvictionPolicy.LRU,
+  const cache = new MapProCustomTtl<string, string>({
     cacheSize: 1000,
     init: resolveHost,
   });
@@ -795,17 +793,12 @@ export const createExternalLookup = (opt: IExternalLookupOptions = {}) => {
       return cb(null, all ? [{ address: addr, family: fam }] : addr, fam);
     }
 
-    const done = (res: { address: string; family: 4 | 6 }) =>
-      cb(null, all ? [{ address: res.address, family: res.family }] : res.address, res.family);
+    const done = (address: string) => {
+      const family = net.isIP(address);
+      cb(null, all ? [{ address, family }] : address, family);
+    };
 
     const cacheKey = `${hostname}:${family}`;
-    const cached = cache.get(cacheKey);
-
-    if (cached) {
-      if (Date.now() < cached.expires) return done(cached);
-      cache.delete(cacheKey);
-    }
-
     cache.getAsync(cacheKey, (err, res) => {
       if (err) return cb(err as NodeJS.ErrnoException);
       if (res) done(res);

@@ -2,7 +2,7 @@
  * "非 Promise" 守卫类型
  * 排除 Promise 实例与 undefined，允许其他任意类型（对象、基础类型、null）
  */
-type NotPromise<V> =
+export type NotPromise<V> =
   Extract<V, Promise<any> | undefined> extends never
     ? object | string | number | boolean | symbol | bigint | null
     : never;
@@ -31,7 +31,7 @@ export enum EMapProEvictionPolicy {
   IDLE_TTL = PolicyFlag.过期淘汰 | PolicyFlag.命中移到队尾,
 }
 
-type IMapProBaseOptions<K, V> = {
+export type IMapProBaseOptions<K, V> = {
   /**
    * 自动初始化函数：调用 get/getAsync 时，若 key 对应的 value 为 undefined，
    * 会调用此函数生成初始值并缓存。支持同步和异步返回。
@@ -101,13 +101,13 @@ type IMapProInternalOptions<K, V> = IMapProBaseOptions<K, V> & {
  * 类型约束：V 不能是 undefined，不能是 Promise 实例（可以是 null）
  */
 export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
-  /** 互斥元状态存储：异步 init 中的 Promise 或 IDLE_TTL 时间戳 */
-  private readonly metaMap = new Map<K, Promise<V> | number>();
-  /** IDLE_TTL 策略下的定时清理器 */
-  private timer: NodeJS.Timeout | null = null;
-  /** IDLE_TTL 策略下队首节点的最早到期时间戳（用于 O(1) 跳过无效清理） */
-  private nextExpireTime = Infinity;
-  private readonly opt: IMapProInternalOptions<K, V>;
+  /** 互斥元状态存储：异步 init 中的 Promise 或 TTL/IDLE_TTL 时间戳 */
+  protected readonly metaMap = new Map<K, Promise<V> | number>();
+  /** 过期策略下的定时清理器 */
+  protected timer: NodeJS.Timeout | null = null;
+  /** 队首节点的最早到期时间戳（用于 O(1) 跳过无效清理） */
+  protected nextExpireTime = Infinity;
+  protected readonly opt: IMapProInternalOptions<K, V>;
 
   constructor(opt: IMapProOptions<K, V> = {}) {
     super();
@@ -205,7 +205,10 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
     const existingPending = this.getPending(key);
     if (existingPending) return existingPending;
 
-    const pending = this.opt.init?.(key);
+    let customTtl: number | undefined;
+    const pending = this.invokeInit(key, ttlMs => {
+      customTtl = ttlMs;
+    });
     if (pending instanceof Promise) {
       // 异步 init：暂存到 metaMap，完成后通过令牌校验再写入主 Map
       this.metaMap.set(key, pending);
@@ -214,7 +217,7 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
           if (value !== undefined && this.metaMap.get(key) === pending) {
             // 先移除 pending 令牌再写入，避免触发 set() 的 pending 写保护
             this.metaMap.delete(key);
-            this.set(key, value);
+            this.commitInit(key, value, customTtl);
           }
         })
         // 同步 get() 触发异步 init 时外层无 await，兜底捕获防止 UnhandledPromiseRejection
@@ -224,9 +227,19 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
         });
       return pending;
     }
-    if (pending !== undefined) this.set(key, pending);
+    if (pending !== undefined) this.commitInit(key, pending, customTtl);
 
     return pending;
+  }
+
+  /** 执行自动初始化回调（子类可重写以透传额外参数，如独立 TTL 回调） */
+  protected invokeInit(key: K, _setTtl: (ttlMs: number) => void): V | Promise<V> | undefined {
+    return this.opt.init?.(key);
+  }
+
+  /** 将 init 产出的值写入缓存（子类可重写以透传独立 TTL） */
+  protected commitInit(key: K, value: V, _ttlMs?: number): void {
+    this.set(key, value);
   }
 
   /** 手动设置 key-value，自动维护淘汰队列与元数据 */
@@ -270,7 +283,7 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
 
   /** 删除指定 key 的节点（含未完成的 pending）并触发 beforeDelete 回调 */
   public override delete(key: K): boolean {
-    if (this.metaMap.size > 0) this.metaMap.delete(key);
+    if (this.metaMap.size > 0) this.deleteMeta(key);
     if (!super.has(key)) return false;
     const value = super.get(key)!;
     super.delete(key);
@@ -286,33 +299,48 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
     return true;
   }
 
+  /** 删除指定 key 对应的元状态（子类可重写以同步清理自定义索引） */
+  protected deleteMeta(key: K): void {
+    this.metaMap.delete(key);
+  }
+
   /** FIFO / LRU 淘汰：从队首依次弹出最老节点，直到容量合规 */
-  private evictToSize() {
+  protected evictToSize(): void {
     const cacheSize = this.opt.cacheSize;
     if (this.size <= cacheSize) return;
     const beforeDelete = this.opt.beforeDelete;
     const hasMeta = this.metaMap.size > 0;
     for (const [key, value] of this) {
       super.delete(key);
-      if (hasMeta) this.metaMap.delete(key);
+      if (hasMeta) this.deleteMeta(key);
       beforeDelete?.(key, value);
       if (this.size <= cacheSize) break;
     }
   }
 
   /**
-   * 清理已过期的节点（仅在 IDLE_TTL 且 cacheTime 为有限值时生效）
+   * 清理已过期的节点（仅在 TTL / IDLE_TTL 且 cacheTime 为有限值时生效）
    * - 返回是否有过期节点被清理（`true` 表示至少清理了 1 个，`false` 表示无需清理）
    */
   public clean(now?: number): boolean {
     if (this.nextExpireTime === Infinity) return false;
     const curNow = now ?? Date.now();
     if (curNow < this.nextExpireTime) return false;
+    // 循环前先重置为 Infinity，防止 beforeDelete 回调重入 get/has/set 时重复触发清理
+    this.nextExpireTime = Infinity;
+    const cleaned = this.cleanExpired(curNow);
+    if ((this.size <= 0 || this.nextExpireTime === Infinity) && this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    return cleaned;
+  }
+
+  /** 清理当前时刻已过期的节点并更新 nextExpireTime（子类可重写以替换过期队列结构） */
+  protected cleanExpired(curNow: number): boolean {
     const expTime = curNow - this.opt.cacheTime;
     const beforeDelete = this.opt.beforeDelete;
     let cleaned = false;
-    // 循环前先重置为 Infinity，防止 beforeDelete 回调重入 get/has/set 时重复触发清理
-    this.nextExpireTime = Infinity;
     for (const [key, value] of this) {
       const ts = this.metaMap.get(key);
       if (typeof ts !== "number") continue; // 跳过异常无时间戳节点，避免卡死后续过期清理
@@ -326,15 +354,12 @@ export class MapPro<K, V extends NotPromise<V>> extends Map<K, V> {
         break; // 队首到队尾时间戳单调递增，遇到首个未过期节点可立即停止
       }
     }
-    if (this.size <= 0 && this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
     return cleaned;
   }
 
   /** 启动单次过期清理定时器 */
-  private scheduleTimer(delay: number) {
+  protected scheduleTimer(delay: number): void {
+    if (this.timer) clearTimeout(this.timer);
     // 截断至 32 位有符号整数上限，避免 Node.js TimeoutOverflowWarning
     this.timer = setTimeout(() => this.timerFn(), Math.min(delay, -1 >>> 1));
     this.timer.unref?.(); // 不阻塞进程正常退出
