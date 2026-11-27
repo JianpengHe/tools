@@ -46,25 +46,75 @@ export class CertGenerator {
     SHA256_RSA: Buffer.from([0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]),
     /** 主题属性: Common Name / 常用名称 (2.5.4.3 / id-at-commonName) */
     COMMON_NAME: Buffer.from([0x06, 0x03, 0x55, 0x04, 0x03]),
+    /** 标准扩展: Subject Key Identifier / 主体密钥标识符 (2.5.29.14 / id-ce-subjectKeyIdentifier) */
+    SKI: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x0e]),
     /** 标准扩展: Key Usage / 密钥用法 (2.5.29.15 / id-ce-keyUsage) */
     KEY_USAGE: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x0f]), // 2.5.29.15
     /** 标准扩展: Basic Constraints / 基本约束 (2.5.29.19 / id-ce-basicConstraints) */
     BASIC_CONSTRAINTS: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13]),
+    /** 标准扩展: CRL Number / 吊销列表序号 (2.5.29.20 / id-ce-cRLNumber) */
+    CRL_NUMBER: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x14]),
     /** 标准扩展: Subject Alternative Name / 主题备用名称 (2.5.29.17 / id-ce-subjectAltName) */
     SAN: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x11]),
     /** 标准扩展: Extended Key Usage / 增强型密钥用法 (2.5.29.37 / id-ce-extKeyUsage) */
     EKU: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x25]),
     /** 增强密钥用法目的: Server Authentication / 服务器身份验证 (1.3.6.1.5.5.7.3.1 / id-kp-serverAuth) */
     SERVER_AUTH: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01]),
-    /** 标准扩展: Authority Information Access / 颁发机构信息访问 (1.3.6.1.5.5.7.1.1 / id-pe-authorityInfoAccess) */
-    AIA: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01]),
-    /** AIA 访问方法: OCSP (1.3.6.1.5.5.7.48.1 / id-ad-ocsp) */
-    AD_OCSP: Buffer.from([0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01]),
     /** 标准扩展: CRL Distribution Points / CRL 分发点 (2.5.29.31 / id-ce-cRLDistributionPoints) */
     CDP: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x1f]),
+    /** 标准扩展: Authority Key Identifier / 颁发者密钥标识符 (2.5.29.35 / id-ce-authorityKeyIdentifier) */
+    AKI: Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x23]),
     /** 扩展请求属性: Extension Request (1.2.840.113549.1.9.14 / pkcs-9-at-extensionRequest) */
     EXTENSION_REQUEST: Buffer.from([0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x0e]),
   };
+
+  /** 生成首位非零的正整数随机序列号 (8 字节) */
+  private static randomSerial(): Buffer {
+    const buf = crypto.randomBytes(8);
+    buf[0] |= 0x01;
+    return ASN1Encoder.integer(buf);
+  }
+
+  /** 校验并转换为 RSA 私钥 KeyObject */
+  private static toRsaPrivateKey(key: crypto.KeyObject | string | Buffer): crypto.KeyObject {
+    const keyObj = key instanceof crypto.KeyObject ? key : crypto.createPrivateKey(key);
+    if (keyObj.asymmetricKeyType !== "rsa") {
+      throw new Error(`Unsupported key type: ${keyObj.asymmetricKeyType}, only RSA is supported`);
+    }
+    return keyObj;
+  }
+
+  /** 解析 CA 证书 PEM 或直接复用 Subject DER，同时返回规范化后的 CA PEM（若输入为 PEM） */
+  private static parseCaInput(caCertOrNameDer: Buffer | string): { caNameDer: Buffer; caCertPem: string } {
+    if (typeof caCertOrNameDer === "string" || caCertOrNameDer.includes("-----BEGIN CERTIFICATE-----")) {
+      const text = typeof caCertOrNameDer === "string" ? caCertOrNameDer : caCertOrNameDer.toString("utf8");
+      const blocks = text.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+      if (!blocks) throw new Error("Invalid CA certificate PEM");
+      return {
+        caNameDer: ASN1Encoder.extractSubject(blocks[0]),
+        caCertPem: blocks.join("\n") + "\n",
+      };
+    }
+    return { caNameDer: caCertOrNameDer, caCertPem: "" };
+  }
+
+  /** 计算 RSA 密钥对应的 20 字节 SHA-1 KeyIdentifier (RFC 5280 §4.2.1.2) */
+  private static getKeyId(key: crypto.KeyObject): Buffer {
+    const pubKey = key.type === "public" ? key : crypto.createPublicKey(key);
+    return crypto
+      .createHash("sha1")
+      .update(pubKey.export({ type: "pkcs1", format: "der" }))
+      .digest();
+  }
+
+  /** 构造 Authority Key Identifier (AKI) 扩展 (keyIdentifier [0] IMPLICIT) */
+  private static buildAkiExt(caKey: crypto.KeyObject): Buffer {
+    const keyId = this.getKeyId(caKey);
+    return ASN1Encoder.sequence(
+      this.OID.AKI,
+      ASN1Encoder.octetString(ASN1Encoder.sequence(Buffer.concat([Buffer.from([0x80, keyId.length]), keyId]))),
+    );
+  }
 
   /**
    * 生成 CA 根证书及私钥 (自签名 X.509 v3 证书)
@@ -87,16 +137,20 @@ export class CertGenerator {
    *   - `expiry`: 证书过期时间戳（毫秒）
    */
   public static async createRootCA(commonName: string, expiryTime?: number) {
+    const cn = commonName.trim();
+    if (!cn) throw new Error("CA commonName must not be empty");
+    if ([...cn].length > 64) throw new Error("CA commonName exceeds 64 characters");
+
     // 1. 生成 CA 密钥对
     const { privateKey, publicKey } = await generateRsaKey();
     const pubKeyDer = publicKey.export({ type: "spki", format: "der" });
 
     // 2. 构造 TBS (To Be Signed)
     const version = Buffer.from([0xa0, 0x03, 0x02, 0x01, 0x02]); // v3
-    const serial = ASN1Encoder.integer(crypto.randomBytes(8));
+    const serial = this.randomSerial();
     const sigAlg = ASN1Encoder.sequence(this.OID.SHA256_RSA, Buffer.from([0x05, 0x00])); // Alg + NULL
     const name = ASN1Encoder.sequence(
-      ASN1Encoder.set(ASN1Encoder.sequence(this.OID.COMMON_NAME, ASN1Encoder.utf8String(commonName))),
+      ASN1Encoder.set(ASN1Encoder.sequence(this.OID.COMMON_NAME, ASN1Encoder.utf8String(cn))),
     );
 
     // 生效时间：向前偏移 10 分钟防止客户端时钟漂移
@@ -123,7 +177,13 @@ export class CertGenerator {
       ASN1Encoder.octetString(ASN1Encoder.bitString(Buffer.from([0x86]), 1)),
     );
 
-    const extensions = ASN1Encoder.sequence(bcExt, caKuExt);
+    // Subject Key Identifier (SKI): CA 公钥 SHA-1 (RFC 5280 MUST)
+    const skiExt = ASN1Encoder.sequence(
+      this.OID.SKI,
+      ASN1Encoder.octetString(ASN1Encoder.octetString(this.getKeyId(publicKey))),
+    );
+
+    const extensions = ASN1Encoder.sequence(bcExt, caKuExt, skiExt);
     const extContext = Buffer.concat([Buffer.from([0xa3]), ASN1Encoder.encodeLength(extensions.length), extensions]);
 
     const tbs = ASN1Encoder.sequence(version, serial, sigAlg, name, validity, name, pubKeyDer, extContext);
@@ -150,7 +210,7 @@ export class CertGenerator {
   private static parseSAN(domain: string | string[]): { commonName: string; sanBuffers: Buffer[] } {
     const rawList = (Array.isArray(domain) ? domain : [domain])
       .flatMap(d => d.split(/[,;\s]+/))
-      .map(d => d.trim())
+      .map(d => d.trim().toLowerCase())
       .filter(Boolean);
 
     const sanBuffers: Buffer[] = [];
@@ -158,11 +218,23 @@ export class CertGenerator {
     let commonName = "";
 
     for (const item of rawList) {
-      const target = url.domainToASCII(item) || item;
-      if (!commonName) commonName = target;
-      if (!added.has(target)) {
-        added.add(target);
-        sanBuffers.push(net.isIP(item) ? ASN1Encoder.ipAddress(item) : ASN1Encoder.dNSName(target));
+      const unbracketed = item.startsWith("[") && item.endsWith("]") ? item.slice(1, -1) : null;
+      const isIp = net.isIP(unbracketed ?? item);
+      if ((unbracketed !== null && isIp !== 6) || (!isIp && /[/?#\\]/.test(item))) {
+        throw new Error(`Invalid domain or IP: ${item}`);
+      }
+      const target = isIp ? (unbracketed ?? item) : url.domainToASCII(item);
+      if (!target) throw new Error(`Invalid domain or IP: ${item}`);
+      // X.509 Common Name 上限 64 字符 (ub-common-name-length)
+      if (!commonName) {
+        if ([...target].length > 64) throw new Error(`Common Name exceeds 64 characters: ${target}`);
+        commonName = target;
+      }
+      const entry = isIp ? ASN1Encoder.ipAddress(target) : ASN1Encoder.dNSName(target);
+      const key = entry.toString("hex");
+      if (!added.has(key)) {
+        added.add(key);
+        sanBuffers.push(entry);
       }
     }
 
@@ -186,7 +258,7 @@ export class CertGenerator {
    * @param domain 域名或 IP，支持单个字符串（支持逗号/空格分隔多个）或字符串数组
    * @param caKey CA 私钥，可为 KeyObject 对象、PEM 格式文本或 DER Buffer
    * @param caCertOrNameDer CA 根证书 PEM 文本或 CA Subject 的 DER Buffer
-   * @param expiryTime 服务器证书到期毫秒时间戳，不传则默认为当前时间起 1 年
+   * @param expiryTime 服务器证书到期毫秒时间戳，不传则默认为当前时间起 180 天
    * @param crlUrl CRL 分发点 URL（如 "http://127.0.0.1:8919/ca.crl"），为空则不添加 CDP 扩展
    * @returns 返回包含服务器私钥及完整证书链的对象：
    *   - `key`: PKCS#8 格式的服务器私钥 PEM 字符串
@@ -200,14 +272,8 @@ export class CertGenerator {
     expiryTime?: number,
     crlUrl?: string,
   ) {
-    const caKeyObj = caKey instanceof crypto.KeyObject ? caKey : crypto.createPrivateKey(caKey);
-    if (caKeyObj.asymmetricKeyType !== "rsa") {
-      throw new Error(`Unsupported CA key type: ${caKeyObj.asymmetricKeyType}, only RSA is supported`);
-    }
-    const caNameDer =
-      typeof caCertOrNameDer === "string" || caCertOrNameDer.subarray(0, 30).toString("ascii").includes("-----BEGIN")
-        ? ASN1Encoder.extractSubject(caCertOrNameDer)
-        : caCertOrNameDer;
+    const caKeyObj = this.toRsaPrivateKey(caKey);
+    const { caNameDer, caCertPem } = this.parseCaInput(caCertOrNameDer);
 
     // 1. 生成服务器密钥对
     const { privateKey, publicKey } = await generateRsaKey();
@@ -215,7 +281,7 @@ export class CertGenerator {
 
     // 2. 构造 TBS
     const version = Buffer.from([0xa0, 0x03, 0x02, 0x01, 0x02]); // v3
-    const serial = ASN1Encoder.integer(crypto.randomBytes(8));
+    const serial = this.randomSerial();
     const sigAlg = ASN1Encoder.sequence(this.OID.SHA256_RSA, Buffer.from([0x05, 0x00]));
 
     // 解析并标准化传入的域名/IP列表，构造 SAN 与 Common Name
@@ -228,8 +294,8 @@ export class CertGenerator {
 
     // 生效时间：向前偏移 10 分钟防止客户端时钟漂移
     const notBefore = new Date(Date.now() - 10 * 60 * 1000);
-    // 到期时间：默认 1 年
-    const notAfter = expiryTime !== undefined ? new Date(expiryTime) : new Date(notBefore.getTime() + 365 * 86400_000);
+    // 到期时间：默认 180 天
+    const notAfter = expiryTime !== undefined ? new Date(expiryTime) : new Date(notBefore.getTime() + 180 * 86400_000);
     if (notAfter.getTime() <= notBefore.getTime()) {
       throw new Error(
         `Invalid certificate validity: notAfter (${notAfter.toISOString()}) must be later than notBefore (${notBefore.toISOString()})`,
@@ -258,9 +324,9 @@ export class CertGenerator {
     );
 
     // - CDP: CRL Distribution Points（若提供了 crlUrl，写入 CRL 分发点地址供客户端查询吊销状态）
-    const extList = [bcExt, serverKuExt, sanExt, ekuExt];
+    const extList = [bcExt, serverKuExt, sanExt, ekuExt, this.buildAkiExt(caKeyObj)];
     if (crlUrl) {
-      const crlUrlBuf = Buffer.from(crlUrl, "ascii");
+      const crlUrlBuf = Buffer.from(new URL(crlUrl).toString(), "ascii");
       // uniformResourceIdentifier [6] IMPLICIT (0x86)
       const uri = Buffer.concat([Buffer.from([0x86]), ASN1Encoder.encodeLength(crlUrlBuf.length), crlUrlBuf]);
       // DistributionPointName.fullName [0] CONSTRUCTED (0xa0)
@@ -286,14 +352,6 @@ export class CertGenerator {
     const certDer = ASN1Encoder.sequence(tbs, sigAlg, ASN1Encoder.bitString(signature));
     const serverCertPem = ASN1Encoder.toPem("CERTIFICATE", certDer);
 
-    // 仅当传入的是有效 CA 证书 PEM 时才拼接完整证书链，避免传入 caNameDer 时拼接二进制乱码
-    const caCertPem =
-      typeof caCertOrNameDer === "string" && caCertOrNameDer.includes("-----BEGIN CERTIFICATE-----")
-        ? caCertOrNameDer
-        : Buffer.isBuffer(caCertOrNameDer) && caCertOrNameDer.toString("ascii").includes("-----BEGIN CERTIFICATE-----")
-          ? caCertOrNameDer.toString("utf8")
-          : "";
-
     return {
       key: ASN1Encoder.toPem("PRIVATE KEY", privateKey.export({ type: "pkcs8", format: "der" })),
       cert: caCertPem ? serverCertPem + caCertPem : serverCertPem,
@@ -312,12 +370,18 @@ export class CertGenerator {
    * 5. nextUpdate: 吊销列表下一次更新的到期时间戳，必须大于 thisUpdate
    * 6. revokedCertificates: 省略（表示没有被吊销的证书）
    *
-   * @param caKey CA 私钥 KeyObject，用于签名 CRL
-   * @param caNameDer CA Subject Name 的 ASN.1 DER 编码 Buffer
+   * @param caKey CA 私钥，可为 KeyObject 对象、PEM 格式文本或 DER Buffer
+   * @param caCertOrNameDer CA 根证书 PEM 文本或 CA Subject Name 的 ASN.1 DER Buffer
    * @param expiryTime CRL 下次更新毫秒时间戳（通常对齐 CA 根证书的 expiry）
    * @returns DER 编码的 CRL Buffer，可通过 ASN1Encoder.toPem("X509 CRL", ...) 转为 PEM
    */
-  public static createCRL(caKey: crypto.KeyObject, caNameDer: Buffer, expiryTime: number): Buffer {
+  public static createCRL(
+    caKey: crypto.KeyObject | string | Buffer,
+    caCertOrNameDer: Buffer | string,
+    expiryTime: number,
+  ): Buffer {
+    const caKeyObj = this.toRsaPrivateKey(caKey);
+    const { caNameDer } = this.parseCaInput(caCertOrNameDer);
     const sigAlg = ASN1Encoder.sequence(this.OID.SHA256_RSA, Buffer.from([0x05, 0x00]));
     const thisUpdate = new Date(Date.now() - 10 * 60 * 1000);
     const nextUpdate = new Date(expiryTime);
@@ -326,7 +390,17 @@ export class CertGenerator {
         `Invalid CRL validity: nextUpdate (${nextUpdate.toISOString()}) must be later than thisUpdate (${thisUpdate.toISOString()})`,
       );
     }
-    // TBSCertList: version(v2=1), sigAlg, issuer, thisUpdate, nextUpdate
+    // v2 CRL 扩展: AKI + 单调递增的 CRL Number (RFC 5280 §5.2)
+    const crlNumBuf = Buffer.alloc(6);
+    crlNumBuf.writeUIntBE(Date.now(), 0, 6);
+    const crlNumExt = ASN1Encoder.sequence(
+      this.OID.CRL_NUMBER,
+      ASN1Encoder.octetString(ASN1Encoder.integer(crlNumBuf)),
+    );
+    const crlExts = ASN1Encoder.sequence(this.buildAkiExt(caKeyObj), crlNumExt);
+    const crlExtContext = Buffer.concat([Buffer.from([0xa0]), ASN1Encoder.encodeLength(crlExts.length), crlExts]);
+
+    // TBSCertList: version(v2=1), sigAlg, issuer, thisUpdate, nextUpdate, crlExtensions([0])
     // 无 revokedCertificates 字段（空列表 = 未吊销任何证书）
     const tbsCertList = ASN1Encoder.sequence(
       ASN1Encoder.integer(Buffer.from([0x01])),
@@ -334,8 +408,9 @@ export class CertGenerator {
       caNameDer,
       ASN1Encoder.utcTime(thisUpdate),
       ASN1Encoder.utcTime(nextUpdate),
+      crlExtContext,
     );
-    const signature = crypto.sign("sha256", tbsCertList, caKey);
+    const signature = crypto.sign("sha256", tbsCertList, caKeyObj);
     return ASN1Encoder.sequence(tbsCertList, sigAlg, ASN1Encoder.bitString(signature));
   }
 
@@ -360,16 +435,7 @@ export class CertGenerator {
     domain: string | string[],
     key?: crypto.KeyObject | string | Buffer,
   ): Promise<{ key: string; csr: string; keyObj: crypto.KeyObject }> {
-    let privateKey: crypto.KeyObject;
-    if (key) {
-      privateKey = key instanceof crypto.KeyObject ? key : crypto.createPrivateKey(key);
-    } else {
-      const generated = await generateRsaKey();
-      privateKey = generated.privateKey;
-    }
-    if (privateKey.asymmetricKeyType !== "rsa") {
-      throw new Error(`Unsupported key type: ${privateKey.asymmetricKeyType}, only RSA is supported`);
-    }
+    const privateKey = key ? this.toRsaPrivateKey(key) : (await generateRsaKey()).privateKey;
     const publicKey = crypto.createPublicKey(privateKey);
     const pubKeyDer = publicKey.export({ type: "spki", format: "der" });
 
@@ -385,10 +451,7 @@ export class CertGenerator {
 
     // Attributes: 构造 extensionRequest (1.2.840.113549.1.9.14) 属性并植入 SAN 扩展
     const sanExt = ASN1Encoder.sequence(this.OID.SAN, ASN1Encoder.octetString(ASN1Encoder.sequence(...sanBuffers)));
-    const extReqAttr = ASN1Encoder.sequence(
-      this.OID.EXTENSION_REQUEST,
-      ASN1Encoder.set(ASN1Encoder.sequence(sanExt)),
-    );
+    const extReqAttr = ASN1Encoder.sequence(this.OID.EXTENSION_REQUEST, ASN1Encoder.set(ASN1Encoder.sequence(sanExt)));
     // [0] IMPLICIT Attributes
     const attributes = Buffer.concat([Buffer.from([0xa0]), ASN1Encoder.encodeLength(extReqAttr.length), extReqAttr]);
 
@@ -416,7 +479,7 @@ export class CertGenerator {
  * 1. 自动生成默认 20 年有效期的 RSA-2048 自签名 CA 根证书与私钥；
  * 2. 使用 CA 私钥签发空 CRL (Certificate Revocation List)，有效期对齐 CA；
  * 3. 生成符合 PKCS#10 规范的 CSR (Certificate Signing Request) 证书签名请求与私钥；
- * 4. 使用 CA 私钥签发服务器证书（默认 1 年），涵盖主域名、通配符泛域名、IPv4、IPv6、中文域名，并植入 CRL 分发点 URL；
+ * 4. 使用 CA 私钥签发服务器证书（默认 180 天），涵盖主域名、通配符泛域名、IPv4、IPv6、中文域名，并植入 CRL 分发点 URL；
  * 5. 将生成的证书和私钥写入本地文件，并使用 Node.js 原生 crypto.X509Certificate 进行结构校验与属性打印。
  *
  * 如需调试测试，可解除下方对应代码块的注释直接运行。
@@ -448,12 +511,12 @@ export class CertGenerator {
 //   const csrContext = await CertGenerator.createCSR(targetDomains);
 //   console.log("✅ CSR 证书签名请求生成成功！");
 //
-//   console.log(`⏳ 正在使用 CA 私钥签发服务器证书 (默认 1 年)，包含域名/IP: ${targetDomains.join(", ")}，CRL: ${crlUrl}...`);
+//   console.log(`⏳ 正在使用 CA 私钥签发服务器证书 (默认 180 天)，包含域名/IP: ${targetDomains.join(", ")}，CRL: ${crlUrl}...`);
 //   const serverContext = await CertGenerator.createServerCert(
 //     targetDomains,
 //     caContext.caKeyObj,
 //     caContext.caCertPem,
-//     undefined, // 默认 1 年
+//     undefined, // 默认 180 天
 //     crlUrl,
 //   );
 //   console.log("✅ 服务器证书签发成功！到期时间:", new Date(serverContext.expiry).toISOString());

@@ -58,7 +58,7 @@ async function getCert(keyPath: string, certPath: string) {
     const validFrom = (x509.validFromDate || new Date(x509.validFrom)).getTime();
     const validTo = (x509.validToDate || new Date(x509.validTo)).getTime();
     const now = new Date().getTime();
-    expiry = validFrom > now ? 0 : validTo;
+    expiry = validFrom > now || validTo <= now ? 0 : validTo;
   }
 
   return expiry > 0
